@@ -1,18 +1,18 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  ChevronLeft, 
-  ChevronRight, 
-  Maximize2, 
-  Minimize2, 
-  Sparkles, 
-  Layers, 
-  Settings, 
-  Edit3, 
-  RotateCcw, 
-  Plus, 
-  Trash2, 
-  Check, 
+import {
+  ChevronLeft,
+  ChevronRight,
+  Maximize2,
+  Minimize2,
+  Sparkles,
+  Layers,
+  Settings,
+  Edit3,
+  RotateCcw,
+  Plus,
+  Trash2,
+  Check,
   Info,
   Sliders,
   Grid,
@@ -22,7 +22,7 @@ import {
   Expand
 } from "lucide-react";
 import { Page, Panel } from "../types";
-import { detectPanelsHeuristic, createGridPanels } from "../lib/cv-helper";
+import { detectPanelsHeuristic, createGridPanels, loadImage } from "../lib/cv-helper";
 
 interface PanelViewerProps {
   page: Page;
@@ -64,6 +64,41 @@ export default function PanelViewer({
 
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // --- Real geometry tracking (fixes centering/clipping bugs) -------------
+  // The panel pan/zoom math needs to know two things in real pixels:
+  // 1) how big the viewer stage actually is right now (resizes with window/
+  //    orientation), and 2) the manga page's *intrinsic* pixel dimensions
+  // (so we can work out exactly how object-contain/object-cover letterboxes
+  // or crops it inside the stage). Guessing that the image always fills the
+  // container 1:1 is what caused panels to end up off-center or clipped.
+  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
+  const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setContainerSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setImgNatural({ w: 0, h: 0 }); // reset until the new page's real size is known
+    loadImage(page.imageUrl)
+      .then((img) => {
+        if (!cancelled) setImgNatural({ w: img.naturalWidth, h: img.naturalHeight });
+      })
+      .catch(() => {
+        // If this fails, we'll just fall back to scale 1 / no translate below.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page.imageUrl]);
+
   // Synchronize panels when page changes
   useEffect(() => {
     if (page.panels && page.panels.length > 0) {
@@ -73,13 +108,13 @@ export default function PanelViewer({
       handleAutoDetectHeuristic();
     }
     setCurrentPanelIndex(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isEditing) return; // disable during manual edits
-
       if (e.key === "ArrowRight" || e.key === " ") {
         handleNext();
       } else if (e.key === "ArrowLeft") {
@@ -90,6 +125,7 @@ export default function PanelViewer({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPanelIndex, panels, readingMode, isEditing]);
 
   const handlePrev = () => {
@@ -206,21 +242,62 @@ export default function PanelViewer({
     setCurrentPanelIndex(updated.length - 1);
   };
 
-  // Panel zoom: scale + translate to keep every panel centered in the viewport
+  // --- Panel zoom: scale + translate to keep every panel centered --------
+  // Computed entirely in real pixels from the *actual* measured stage size
+  // and the page's intrinsic image size, so it's correct regardless of
+  // whether object-contain letterboxes the page or object-cover crops it.
   const currentPanel = panels[currentPanelIndex] || { id: 1, box: [0, 0, 1000, 1000] };
   const [ymin, xmin, ymax, xmax] = currentPanel.box;
 
-  const pw = (xmax - xmin) / 10;
-  const ph = (ymax - ymin) / 10;
+  const containerW = containerSize.w;
+  const containerH = containerSize.h;
+  const naturalW = imgNatural.w;
+  const naturalH = imgNatural.h;
+  const geometryReady = containerW > 0 && containerH > 0 && naturalW > 0 && naturalH > 0;
 
-  const scale = fillScreen
-    ? Math.max(1, Math.min(Math.max(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 8))
-    : Math.max(1, Math.min(Math.min(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 6));
+  let scale = 1;
+  let translateX = 0;
+  let translateY = 0;
 
-  const cx = (xmin + xmax) / 20;
-  const cy = (ymin + ymax) / 20;
-  const translateX = (50 - cx) * scale;
-  const translateY = (50 - cy) * scale;
+  if (geometryReady) {
+    // How the page is actually rendered inside the stage right now:
+    // "contain" fits the whole page (letterboxed on one axis), "cover"
+    // fills the stage completely (cropped on one axis). Both cases are
+    // handled by the same formula below.
+    const displayScale = fillScreen
+      ? Math.max(containerW / naturalW, containerH / naturalH)
+      : Math.min(containerW / naturalW, containerH / naturalH);
+    const displayedW = naturalW * displayScale;
+    const displayedH = naturalH * displayScale;
+    // Offset of the rendered page's top-left corner from the stage's
+    // top-left corner. Positive = letterbox padding, negative = cropped
+    // off-screen (cover mode).
+    const offsetX = (containerW - displayedW) / 2;
+    const offsetY = (containerH - displayedH) / 2;
+
+    const u0 = xmin / 1000;
+    const u1 = xmax / 1000;
+    const v0 = ymin / 1000;
+    const v1 = ymax / 1000;
+    const panelNormW = Math.max(u1 - u0, 0.001);
+    const panelNormH = Math.max(v1 - v0, 0.001);
+    const panelPxW = panelNormW * displayedW;
+    const panelPxH = panelNormH * displayedH;
+
+    const rawScale = fillScreen
+      ? Math.max(containerW / panelPxW, containerH / panelPxH)
+      : Math.min(containerW / panelPxW, containerH / panelPxH);
+    scale = Math.max(1, Math.min(rawScale * zoomCushion, fillScreen ? 8 : 6));
+
+    // Where the panel's center actually sits on screen right now, before
+    // any transform is applied.
+    const panelCenterX = offsetX + ((u0 + u1) / 2) * displayedW;
+    const panelCenterY = offsetY + ((v0 + v1) / 2) * displayedH;
+
+    // Move that point to the exact center of the stage, post-scale.
+    translateX = scale * (containerW / 2 - panelCenterX);
+    translateY = scale * (containerH / 2 - panelCenterY);
+  }
 
   return (
     <div className="flex flex-col h-full bg-black text-gray-200 select-none overflow-hidden" id="panel-viewer-root">
@@ -240,8 +317,8 @@ export default function PanelViewer({
           <button
             onClick={() => setReadingMode(readingMode === "page" ? "panel" : "page")}
             className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold ${
-              readingMode === "panel" 
-                ? "bg-blue-600/15 text-blue-400 border border-blue-500/30" 
+              readingMode === "panel"
+                ? "bg-blue-600/15 text-blue-400 border border-blue-500/30"
                 : "bg-[#1e1e1e] hover:bg-[#252525] border border-white/5 text-white/80 hover:text-white"
             }`}
             title="Toggle panel / full page reading mode"
@@ -256,8 +333,8 @@ export default function PanelViewer({
             <button
               onClick={() => setBlackoutSurround(!blackoutSurround)}
               className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold border ${
-                blackoutSurround 
-                  ? "bg-pink-600/15 text-pink-400 border-pink-500/30" 
+                blackoutSurround
+                  ? "bg-pink-600/15 text-pink-400 border-pink-500/30"
                   : "bg-[#1e1e1e] hover:bg-[#252525] border-white/5 text-white/60 hover:text-white"
               }`}
               title="Toggle blackout background focus"
@@ -273,8 +350,8 @@ export default function PanelViewer({
             <button
               onClick={() => setFillScreen(!fillScreen)}
               className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold border ${
-                fillScreen 
-                  ? "bg-emerald-600/15 text-emerald-400 border-emerald-500/30" 
+                fillScreen
+                  ? "bg-emerald-600/15 text-emerald-400 border-emerald-500/30"
                   : "bg-[#1e1e1e] hover:bg-[#252525] border-white/5 text-white/60 hover:text-white"
               }`}
               title="Toggle fill screen mode"
@@ -289,8 +366,8 @@ export default function PanelViewer({
           <button
             onClick={() => setShowConfig(!showConfig)}
             className={`p-2 rounded-lg transition-colors border ${
-              showConfig 
-                ? "bg-[#252525] border-white/20 text-white" 
+              showConfig
+                ? "bg-[#252525] border-white/20 text-white"
                 : "bg-[#1e1e1e] hover:bg-[#252525] border-white/5 text-white/60 hover:text-white"
             }`}
             title="Panel detection algorithms & settings"
@@ -303,8 +380,8 @@ export default function PanelViewer({
           <button
             onClick={() => setIsEditing(!isEditing)}
             className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold ${
-              isEditing 
-                ? "bg-blue-600/15 text-blue-400 border border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.1)]" 
+              isEditing
+                ? "bg-blue-600/15 text-blue-400 border border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.1)]"
                 : "bg-[#1e1e1e] hover:bg-[#252525] border border-white/5 text-white/80 hover:text-white"
             }`}
             title="Fine-tune and edit panels manually"
@@ -332,7 +409,7 @@ export default function PanelViewer({
                 <h4 className="font-bold text-white flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-blue-400" /> Panel Segmentation
                 </h4>
-                <button 
+                <button
                   onClick={() => setShowConfig(false)}
                   className="text-white/40 hover:text-white"
                 >
@@ -442,7 +519,7 @@ export default function PanelViewer({
                 <span className="font-semibold text-xs text-blue-300 uppercase tracking-wider flex items-center gap-1">
                   <Eye className="w-3.5 h-3.5" /> Cinematic Controls
                 </span>
-                
+
                 {/* Blackout Surround Switch */}
                 <div className="flex items-center justify-between">
                   <div>
@@ -532,16 +609,16 @@ export default function PanelViewer({
             {!fillScreen && (
               <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,rgba(0,0,0,0)_60%,rgba(0,0,0,0.95)_100%)] z-10"></div>
             )}
-            
+
             <motion.div
               className="w-full h-full flex items-center justify-center relative"
               animate={{
                 scale: scale,
-                x: `${translateX}%`,
-                y: `${translateY}%`,
+                x: translateX,
+                y: translateY,
               }}
               transition={{
-                duration: 0.2,
+                duration: 0.28,
                 ease: "easeOut",
               }}
               style={{
@@ -576,7 +653,6 @@ export default function PanelViewer({
               referrerPolicy="no-referrer"
               draggable={false}
             />
-
             {/* Bounding box overlays */}
             <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 1000 1000" preserveAspectRatio="none">
               {panels.map((p, idx) => {
@@ -590,8 +666,8 @@ export default function PanelViewer({
                       width={xmax - xmin}
                       height={ymax - ymin}
                       className={`fill-none transition-all duration-300 ${
-                        active 
-                          ? "stroke-blue-500 stroke-[5] drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]" 
+                        active
+                          ? "stroke-blue-500 stroke-[5] drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]"
                           : "stroke-white/10 stroke-[2] hover:stroke-white/30"
                       }`}
                     />
@@ -620,7 +696,6 @@ export default function PanelViewer({
                 <Info className="w-3.5 h-3.5 text-blue-400" />
                 Select a panel below, then adjust coordinates using input dials.
               </p>
-              
               <div className="relative max-h-[70vh] max-w-full flex items-center justify-center aspect-[2/3] border border-white/10 rounded bg-black">
                 <img
                   src={page.imageUrl}
@@ -629,15 +704,14 @@ export default function PanelViewer({
                   referrerPolicy="no-referrer"
                   draggable={false}
                 />
-
                 {/* Editable overlay SVG */}
                 <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1000 1000" preserveAspectRatio="none">
                   {panels.map((p, idx) => {
                     const [ymin, xmin, ymax, xmax] = p.box;
                     const selected = selectedPanelId === p.id;
                     return (
-                      <g 
-                        key={p.id} 
+                      <g
+                        key={p.id}
                         className="cursor-pointer pointer-events-auto"
                         onClick={() => {
                           setSelectedPanelId(p.id);
@@ -650,8 +724,8 @@ export default function PanelViewer({
                           width={xmax - xmin}
                           height={ymax - ymin}
                           className={`fill-transparent transition-all ${
-                            selected 
-                              ? "stroke-blue-400 stroke-[6] fill-blue-500/10" 
+                            selected
+                              ? "stroke-blue-400 stroke-[6] fill-blue-500/10"
                               : "stroke-white/20 stroke-[3] hover:stroke-white/40"
                           }`}
                         />
@@ -702,8 +776,8 @@ export default function PanelViewer({
                         setCurrentPanelIndex(idx);
                       }}
                       className={`p-3 rounded-lg border text-xs cursor-pointer transition-all ${
-                        selected 
-                          ? "bg-blue-950/20 border-blue-500" 
+                        selected
+                          ? "bg-blue-950/20 border-blue-500"
                           : "bg-black/35 border-white/5 hover:bg-[#1e1e1e]/40"
                       }`}
                     >
@@ -828,8 +902,8 @@ export default function PanelViewer({
                   key={p.id}
                   onClick={() => setCurrentPanelIndex(idx)}
                   className={`h-2 rounded-full transition-all duration-300 ${
-                    idx === currentPanelIndex 
-                      ? "w-6 bg-blue-500" 
+                    idx === currentPanelIndex
+                      ? "w-6 bg-blue-500"
                       : "w-2 bg-[#252525] hover:bg-white/20"
                   }`}
                   title={`Jump to panel ${idx + 1}`}
