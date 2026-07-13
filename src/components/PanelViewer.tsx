@@ -22,7 +22,7 @@ import {
   Expand
 } from "lucide-react";
 import { Page, Panel } from "../types";
-import { detectPanelsHeuristic, createGridPanels, loadImage } from "../lib/cv-helper";
+import { detectPanelsHeuristic, detectPanelsAdvanced, createGridPanels, loadImage } from "../lib/cv-helper";
 
 interface PanelViewerProps {
   page: Page;
@@ -61,6 +61,10 @@ export default function PanelViewer({
   // Manual grid settings
   const [gridRows, setGridRows] = useState(3);
   const [gridCols, setGridCols] = useState(2);
+
+  // Advanced edge detection settings
+  const [cannyLow, setCannyLow] = useState(30);
+  const [cannyHigh, setCannyHigh] = useState(90);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -174,7 +178,27 @@ export default function PanelViewer({
     }
   };
 
-  // 2. Grid split creator
+  // 2. Advanced Canny + Connected Components detection
+  const handleDetectAdvanced = async () => {
+    setIsDetecting(true);
+    try {
+      const detected = await detectPanelsAdvanced(page.imageUrl, {
+        cannyLow,
+        cannyHigh,
+      });
+      setPanels(detected);
+      if (onUpdatePagePanels) {
+        onUpdatePagePanels(page.id, detected);
+      }
+      setCurrentPanelIndex(0);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
+  // 3. Grid split creator
   const handleApplyGrid = () => {
     const gridPanels = createGridPanels(gridRows, gridCols);
     setPanels(gridPanels);
@@ -469,6 +493,62 @@ export default function PanelViewer({
                     </>
                   ) : (
                     <span>Re-Scan Whitespaces</span>
+                  )}
+                </button>
+              </div>
+
+              {/* 2b. Advanced Edge Detector (Canny + Connected Components) */}
+              <div className="mb-4 bg-black/40 p-3 rounded-lg border border-white/5">
+                <span className="font-semibold text-xs text-green-300 uppercase tracking-wider flex items-center gap-1 mb-1.5">
+                  <Sliders className="w-3.5 h-3.5" /> Advanced Edge Detector
+                </span>
+                <p className="text-xs text-white/40 mb-3 leading-relaxed">
+                  Full Canny edge detection with connected component analysis.
+                  Handles irregular layouts and double-page spreads more robustly.
+                </p>
+
+                <div className="space-y-2 mb-3">
+                  <div>
+                    <div className="flex justify-between text-[11px] text-white/40 mb-1">
+                      <span>Edge Lower Threshold: {cannyLow}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="5"
+                      max="80"
+                      value={cannyLow}
+                      onChange={(e) => setCannyLow(parseInt(e.target.value))}
+                      className="w-full accent-green-500 bg-[#1e1e1e] h-1 rounded"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[11px] text-white/40 mb-1">
+                      <span>Edge Upper Threshold: {cannyHigh}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="40"
+                      max="200"
+                      value={cannyHigh}
+                      onChange={(e) => setCannyHigh(parseInt(e.target.value))}
+                      className="w-full accent-green-500 bg-[#1e1e1e] h-1 rounded"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleDetectAdvanced}
+                  disabled={isDetecting}
+                  className="w-full py-1.5 bg-[#1e1e1e] hover:bg-[#252525] border border-white/5 disabled:bg-zinc-850 text-green-400 hover:text-green-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                  id="advanced-detect-btn"
+                >
+                  {isDetecting ? (
+                    <>
+                      <div className="w-3 h-3 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
+                      <span>Detecting panels...</span>
+                    </>
+                  ) : (
+                    <span>Detect Panels (Advanced)</span>
                   )}
                 </button>
               </div>

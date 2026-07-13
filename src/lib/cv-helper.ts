@@ -680,6 +680,321 @@ function sortRTL(boxes: Box[]): Box[] {
 }
 
 /**
+ * Histogram equalization for contrast normalization
+ */
+function histogramEqualization(lum: Float32Array, len: number): Float32Array {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < len; i++) {
+    hist[Math.round(lum[i])]++;
+  }
+
+  const cdf = new Float32Array(256);
+  cdf[0] = hist[0];
+  for (let i = 1; i < 256; i++) {
+    cdf[i] = cdf[i - 1] + hist[i];
+  }
+
+  const cdfMin = cdf.find((v) => v > 0) || 0;
+  const out = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const v = Math.round(lum[i]);
+    out[i] = cdfMin > 0 ? ((cdf[v] - cdfMin) / (len - cdfMin)) * 255 : lum[i];
+  }
+
+  return out;
+}
+
+/**
+ * 3x3 Median filter for noise reduction
+ */
+function medianFilter(lum: Float32Array, w: number, h: number): Float32Array {
+  const out = new Float32Array(lum);
+  const neighbors = new Float32Array(9);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          neighbors[n++] = lum[(y + dy) * w + (x + dx)];
+        }
+      }
+      neighbors.sort();
+      out[y * w + x] = neighbors[4];
+    }
+  }
+  return out;
+}
+
+/**
+ * Proper 3x3 Sobel gradient computation
+ */
+function sobelEdgeDetect(
+  lum: Float32Array,
+  w: number,
+  h: number
+): { grad: Float32Array; dir: Float32Array } {
+  const grad = new Float32Array(w * h);
+  const dir = new Float32Array(w * h);
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const r0 = (y - 1) * w, r1 = y * w, r2 = (y + 1) * w;
+      const gx =
+        -lum[r0 + (x - 1)] + lum[r0 + (x + 1)] +
+        -2 * lum[r1 + (x - 1)] + 2 * lum[r1 + (x + 1)] +
+        -lum[r2 + (x - 1)] + lum[r2 + (x + 1)];
+      const gy =
+        -lum[r0 + (x - 1)] - 2 * lum[r0 + x] - lum[r0 + (x + 1)] +
+        lum[r2 + (x - 1)] + 2 * lum[r2 + x] + lum[r2 + (x + 1)];
+      const c = r1 + x;
+      grad[c] = Math.sqrt(gx * gx + gy * gy);
+      dir[c] = Math.atan2(gy, gx);
+    }
+  }
+  return { grad, dir };
+}
+
+/**
+ * Non-maximum suppression for edge thinning
+ */
+function nonMaxSuppression(
+  grad: Float32Array,
+  dir: Float32Array,
+  w: number,
+  h: number
+): Float32Array {
+  const out = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const c = y * w + x;
+      const angle = ((dir[c] * 180) / Math.PI + 180) % 180;
+      let q = 0, r = 0;
+
+      if ((angle >= 0 && angle < 22.5) || (angle >= 157.5 && angle <= 180)) {
+        q = grad[y * w + (x + 1)];
+        r = grad[y * w + (x - 1)];
+      } else if (angle >= 22.5 && angle < 67.5) {
+        q = grad[(y + 1) * w + (x - 1)];
+        r = grad[(y - 1) * w + (x + 1)];
+      } else if (angle >= 67.5 && angle < 112.5) {
+        q = grad[(y + 1) * w + x];
+        r = grad[(y - 1) * w + x];
+      } else {
+        q = grad[(y - 1) * w + (x - 1)];
+        r = grad[(y + 1) * w + (x + 1)];
+      }
+
+      out[c] = grad[c] >= q && grad[c] >= r ? grad[c] : 0;
+    }
+  }
+  return out;
+}
+
+/**
+ * Double-threshold hysteresis: trace weak edges connected to strong edges
+ */
+function hysteresisThreshold(
+  nms: Float32Array,
+  w: number,
+  h: number,
+  low: number,
+  high: number
+): Uint8Array {
+  const edge = new Uint8Array(w * h);
+
+  for (let i = 0; i < nms.length; i++) {
+    if (nms[i] >= high) edge[i] = 255;
+    else if (nms[i] >= low) edge[i] = 128;
+  }
+
+  const stack: number[] = [];
+  for (let i = 0; i < edge.length; i++) {
+    if (edge[i] === 255) stack.push(i);
+  }
+  while (stack.length > 0) {
+    const c = stack.pop()!;
+    const cy = Math.floor(c / w);
+    const cx = c % w;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const ni = (cy + dy) * w + (cx + dx);
+        if (ni >= 0 && ni < edge.length && edge[ni] === 128) {
+          edge[ni] = 255;
+          stack.push(ni);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < edge.length; i++) {
+    if (edge[i] !== 255) edge[i] = 0;
+  }
+
+  return edge;
+}
+
+/**
+ * Connected component labeling via flood fill (4-connected).
+ * Used on inverted edge maps to find panel regions.
+ */
+function connectedComponents(
+  binary: Uint8Array,
+  w: number,
+  h: number,
+  minPixels: number
+): { xmin: number; ymin: number; xmax: number; ymax: number }[] {
+  const visited = new Uint8Array(w * h);
+  const components: { xmin: number; ymin: number; xmax: number; ymax: number }[] = [];
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (!binary[idx] || visited[idx]) continue;
+
+      let xmin = x, ymin = y, xmax = x, ymax = y;
+      const stack = [idx];
+      visited[idx] = 1;
+      let pixelCount = 0;
+
+      while (stack.length > 0) {
+        const ci = stack.pop()!;
+        const cy = Math.floor(ci / w);
+        const cx = ci % w;
+        pixelCount++;
+
+        xmin = Math.min(xmin, cx);
+        ymin = Math.min(ymin, cy);
+        xmax = Math.max(xmax, cx);
+        ymax = Math.max(ymax, cy);
+
+        if (cx > 0 && binary[ci - 1] && !visited[ci - 1]) { visited[ci - 1] = 1; stack.push(ci - 1); }
+        if (cx < w - 1 && binary[ci + 1] && !visited[ci + 1]) { visited[ci + 1] = 1; stack.push(ci + 1); }
+        if (cy > 0 && binary[ci - w] && !visited[ci - w]) { visited[ci - w] = 1; stack.push(ci - w); }
+        if (cy < h - 1 && binary[ci + w] && !visited[ci + w]) { visited[ci + w] = 1; stack.push(ci + w); }
+      }
+
+      if (pixelCount >= minPixels) {
+        components.push({ xmin, ymin, xmax, ymax });
+      }
+    }
+  }
+
+  return components;
+}
+
+/**
+ * Advanced panel detection using full Canny edge detection + connected components.
+ * More robust than the heuristic gutter-detection approach for irregular layouts.
+ */
+export async function detectPanelsAdvanced(
+  imageUrl: string,
+  options: {
+    minPanelSizePercent?: number;
+    cannyLow?: number;
+    cannyHigh?: number;
+  } = {}
+): Promise<Panel[]> {
+  const {
+    minPanelSizePercent = 3,
+    cannyLow = 30,
+    cannyHigh = 90,
+  } = options;
+
+  try {
+    const img = await loadImage(imageUrl);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return createGridPanels(2, 2);
+
+    const targetWidth = 500;
+    const targetHeight = Math.round((img.height / img.width) * targetWidth);
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+    const data = imgData.data;
+
+    const lum = new Float32Array(targetWidth * targetHeight);
+    for (let i = 0; i < targetWidth * targetHeight; i++) {
+      const idx = i * 4;
+      lum[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+    }
+
+    // 1. Histogram equalization for contrast normalization
+    const equalized = histogramEqualization(lum, targetWidth * targetHeight);
+
+    // 2. Median filter to reduce scan noise
+    const denoised = medianFilter(equalized, targetWidth, targetHeight);
+
+    // 3. Full Canny edge detection
+    const { grad, dir } = sobelEdgeDetect(denoised, targetWidth, targetHeight);
+    const nms = nonMaxSuppression(grad, dir, targetWidth, targetHeight);
+    const edges = hysteresisThreshold(nms, targetWidth, targetHeight, cannyLow, cannyHigh);
+
+    // 4. Morphological close to bridge edge gaps
+    const closed = morphDilate(edges, targetWidth, targetHeight, 3);
+    const closed2 = morphErode(closed, targetWidth, targetHeight, 3);
+
+    // 5. Invert: panel interiors become white, edges become black
+    const inverted = new Uint8Array(targetWidth * targetHeight);
+    for (let i = 0; i < inverted.length; i++) {
+      inverted[i] = closed2[i] ? 0 : 1;
+    }
+
+    // 6. Flood-fill background from image borders to isolate panels
+    const bgFlood = new Uint8Array(inverted);
+    const bStack: number[] = [];
+    for (let x = 0; x < targetWidth; x++) {
+      if (bgFlood[x]) { bStack.push(x); bgFlood[x] = 0; }
+      const bIdx = (targetHeight - 1) * targetWidth + x;
+      if (bgFlood[bIdx]) { bStack.push(bIdx); bgFlood[bIdx] = 0; }
+    }
+    for (let y = 0; y < targetHeight; y++) {
+      const lIdx = y * targetWidth;
+      if (bgFlood[lIdx]) { bStack.push(lIdx); bgFlood[lIdx] = 0; }
+      const rIdx = y * targetWidth + targetWidth - 1;
+      if (bgFlood[rIdx]) { bStack.push(rIdx); bgFlood[rIdx] = 0; }
+    }
+    while (bStack.length > 0) {
+      const ci = bStack.pop()!;
+      const cy = Math.floor(ci / targetWidth);
+      const cx = ci % targetWidth;
+      if (cx > 0 && bgFlood[ci - 1]) { bgFlood[ci - 1] = 0; bStack.push(ci - 1); }
+      if (cx < targetWidth - 1 && bgFlood[ci + 1]) { bgFlood[ci + 1] = 0; bStack.push(ci + 1); }
+      if (cy > 0 && bgFlood[ci - targetWidth]) { bgFlood[ci - targetWidth] = 0; bStack.push(ci - targetWidth); }
+      if (cy < targetHeight - 1 && bgFlood[ci + targetWidth]) { bgFlood[ci + targetWidth] = 0; bStack.push(ci + targetWidth); }
+    }
+
+    // 7. Find connected components (panel regions)
+    const minPixels = (minPanelSizePercent / 100) * targetWidth * targetHeight;
+    const comps = connectedComponents(bgFlood, targetWidth, targetHeight, minPixels);
+
+    if (comps.length === 0) {
+      return [{ id: 1, box: [0, 0, 1000, 1000] }];
+    }
+
+    const boxes = comps.map((c) => ({
+      ymin: Math.round((c.ymin / targetHeight) * 1000),
+      xmin: Math.round((c.xmin / targetWidth) * 1000),
+      ymax: Math.round((c.ymax / targetHeight) * 1000),
+      xmax: Math.round((c.xmax / targetWidth) * 1000),
+    }));
+
+    const merged = mergeSmallBoxes(boxes, targetWidth, targetHeight);
+    const sorted = sortRTL(merged);
+
+    return sorted.map((box, idx) => ({
+      id: idx + 1,
+      box: [box.ymin, box.xmin, box.ymax, box.xmax],
+    }));
+  } catch (err) {
+    console.warn("Advanced panel detection failed, using grid fallback", err);
+    return createGridPanels(2, 2);
+  }
+}
+
+/**
  * Creates uniform grids of panels as a fast secondary algorithm
  */
 export function createGridPanels(rows: number, cols: number): Panel[] {
