@@ -206,7 +206,7 @@ export default function PanelViewer({
     setCurrentPanelIndex(updated.length - 1);
   };
 
-  // Panel zoom: scale to show just the current panel, image stays centered
+  // Panel zoom: scale + translate to keep every panel centered in the viewport
   const currentPanel = panels[currentPanelIndex] || { id: 1, box: [0, 0, 1000, 1000] };
   const [ymin, xmin, ymax, xmax] = currentPanel.box;
 
@@ -216,6 +216,11 @@ export default function PanelViewer({
   const scale = fillScreen
     ? Math.max(1, Math.min(Math.max(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 8))
     : Math.max(1, Math.min(Math.min(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 6));
+
+  const cx = (xmin + xmax) / 20;
+  const cy = (ymin + ymax) / 20;
+  const translateX = (50 - cx) * scale;
+  const translateY = (50 - cy) * scale;
 
   return (
     <div className="flex flex-col h-full bg-black text-gray-200 select-none overflow-hidden" id="panel-viewer-root">
@@ -532,11 +537,12 @@ export default function PanelViewer({
               className="w-full h-full flex items-center justify-center relative"
               animate={{
                 scale: scale,
+                x: `${translateX}%`,
+                y: `${translateY}%`,
               }}
               transition={{
-                type: "spring",
-                damping: 26,
-                stiffness: 120,
+                duration: 0.2,
+                ease: "easeOut",
               }}
               style={{
                 transformOrigin: "50% 50%",
@@ -554,9 +560,8 @@ export default function PanelViewer({
                     : "inset(0% 0% 0% 0%)"
                 }}
                 transition={{
-                  type: "spring",
-                  damping: 26,
-                  stiffness: 120,
+                  duration: 0.15,
+                  ease: "easeOut",
                 }}
               />
             </motion.div>
