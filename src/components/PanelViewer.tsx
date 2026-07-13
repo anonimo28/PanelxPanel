@@ -18,7 +18,8 @@ import {
   Grid,
   Eye,
   EyeOff,
-  Columns
+  Columns,
+  Expand
 } from "lucide-react";
 import { Page, Panel } from "../types";
 import { detectPanelsHeuristic, createGridPanels } from "../lib/cv-helper";
@@ -51,6 +52,7 @@ export default function PanelViewer({
   // Focus & Immersive Blackout settings
   const [blackoutSurround, setBlackoutSurround] = useState<boolean>(true);
   const [zoomCushion, setZoomCushion] = useState<number>(0.96);
+  const [fillScreen, setFillScreen] = useState<boolean>(false);
 
   // Heuristic panel configuration states
   const [gutterThreshold, setGutterThreshold] = useState(242);
@@ -211,7 +213,9 @@ export default function PanelViewer({
   const pw = (xmax - xmin) / 10;
   const ph = (ymax - ymin) / 10;
 
-  const scale = Math.max(1, Math.min(Math.min(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 6));
+  const scale = fillScreen
+    ? Math.max(1, Math.min(Math.max(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 8))
+    : Math.max(1, Math.min(Math.min(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 6));
 
   return (
     <div className="flex flex-col h-full bg-black text-gray-200 select-none overflow-hidden" id="panel-viewer-root">
@@ -256,6 +260,23 @@ export default function PanelViewer({
             >
               {blackoutSurround ? <EyeOff className="w-4 h-4 text-pink-400" /> : <Eye className="w-4 h-4 text-white/60" />}
               <span className="hidden sm:inline">{blackoutSurround ? "Blackout: On" : "Blackout: Off"}</span>
+            </button>
+          )}
+
+          {/* Fill Screen Toggle */}
+          {readingMode === "panel" && (
+            <button
+              onClick={() => setFillScreen(!fillScreen)}
+              className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold border ${
+                fillScreen 
+                  ? "bg-emerald-600/15 text-emerald-400 border-emerald-500/30" 
+                  : "bg-[#1e1e1e] hover:bg-[#252525] border-white/5 text-white/60 hover:text-white"
+              }`}
+              title="Toggle fill screen mode"
+              id="fill-screen-btn"
+            >
+              <Expand className="w-4 h-4" />
+              <span className="hidden sm:inline">{fillScreen ? "Fill: On" : "Fill Screen"}</span>
             </button>
           )}
 
@@ -437,6 +458,26 @@ export default function PanelViewer({
                   </button>
                 </div>
 
+                {/* Fill Screen Toggle */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white/80 block">Fill Screen</span>
+                    <span className="text-[10px] text-white/40 block">Panel fills entire viewport edge-to-edge</span>
+                  </div>
+                  <button
+                    onClick={() => setFillScreen(!fillScreen)}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 ${
+                      fillScreen ? "bg-emerald-600" : "bg-zinc-800"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform duration-200 ${
+                        fillScreen ? "translate-x-5" : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+
                 {/* Zoom Snugness Slider */}
                 <div>
                   <div className="flex justify-between text-[11px] text-white/40 mb-1">
@@ -482,8 +523,10 @@ export default function PanelViewer({
         {readingMode === "panel" ? (
           /* Immersive Pitch Black Guided Panel Mode */
           <div className="absolute inset-0 flex items-center justify-center bg-black overflow-hidden select-none">
-            {/* Dark vignette layer */}
-            <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,rgba(0,0,0,0)_60%,rgba(0,0,0,0.95)_100%)] z-10"></div>
+            {/* Dark vignette layer — hidden in fill screen mode */}
+            {!fillScreen && (
+              <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,rgba(0,0,0,0)_60%,rgba(0,0,0,0.95)_100%)] z-10"></div>
+            )}
             
             <motion.div
               className="w-full h-full flex items-center justify-center relative"
@@ -502,7 +545,7 @@ export default function PanelViewer({
               <motion.img
                 src={page.imageUrl}
                 alt="Manga page panel view"
-                className="max-w-full max-h-full object-contain select-none shadow-2xl"
+                className={`max-w-full max-h-full select-none shadow-2xl ${fillScreen ? "w-full h-full object-cover" : "object-contain"}`}
                 referrerPolicy="no-referrer"
                 draggable={false}
                 animate={{
