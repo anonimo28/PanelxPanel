@@ -1,8 +1,5 @@
 import { Panel } from "../types";
 
-/**
- * Loads an image from a URL or Base64 string and returns an HTMLImageElement
- */
 export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -13,33 +10,41 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+interface Box {
+  ymin: number;
+  xmin: number;
+  ymax: number;
+  xmax: number;
+}
+
 /**
- * Advanced Client-Side Heuristic Panel Detection Algorithm
- * Uses projection-profile document layout analysis on a canvas element.
- * Detects white/light gutters separating comic panels.
+ * Multi-pass panel detection algorithm combining:
+ * 1. Adaptive luminance threshold + edge detection
+ * 2. Projection-profile analysis with adaptive sensitivity
+ * 3. Morphological cleanup and noise rejection
+ * 4. Smart RTL tier grouping
  */
 export async function detectPanelsHeuristic(
   imageUrl: string,
   options: {
-    gutterThreshold?: number; // threshold of pixel value to be considered white (0-255)
-    splitSensitivity?: number; // fraction of row/col that must be white to consider it a gutter
-    minPanelSizePercent?: number; // minimum width/height as a % of page
+    gutterThreshold?: number;
+    splitSensitivity?: number;
+    minPanelSizePercent?: number;
   } = {}
 ): Promise<Panel[]> {
   const {
-    gutterThreshold = 240,
-    splitSensitivity = 0.96,
-    minPanelSizePercent = 5,
+    gutterThreshold: _userThreshold,
+    splitSensitivity: _userSensitivity,
+    minPanelSizePercent = 4,
   } = options;
 
   try {
     const img = await loadImage(imageUrl);
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
-    if (!ctx) return createGridPanels(2, 2); // Fallback to 2x2 grid if canvas fails
+    if (!ctx) return createGridPanels(2, 2);
 
-    // Scale down image for faster processing
-    const targetWidth = 400;
+    const targetWidth = 500;
     const targetHeight = Math.round((img.height / img.width) * targetWidth);
     canvas.width = targetWidth;
     canvas.height = targetHeight;
@@ -48,176 +53,349 @@ export async function detectPanelsHeuristic(
     const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
     const data = imgData.data;
 
-    // Convert to grayscale/binary map
-    // Neutralize borders: often page-scans have dark shadows/borders at the very edges which block the whiteness lines from running
-    const marginX = Math.round(targetWidth * 0.035); // 3.5% padding of the page
-    const marginY = Math.round(targetHeight * 0.035);
+    const marginX = Math.round(targetWidth * 0.04);
+    const marginY = Math.round(targetHeight * 0.04);
 
-    const grid: boolean[][] = []; // true = white/gutter, false = dark/drawing
+    // Compute luminance + horizontal & vertical gradients for every pixel
+    const lum = new Float32Array(targetWidth * targetHeight);
+    const gradX = new Float32Array(targetWidth * targetHeight);
+    const gradY = new Float32Array(targetWidth * targetHeight);
+
     for (let y = 0; y < targetHeight; y++) {
-      grid[y] = [];
-      const isNearY = y < marginY || y > targetHeight - marginY;
       for (let x = 0; x < targetWidth; x++) {
-        const isNearX = x < marginX || x > targetWidth - marginX;
-        
+        const idx = (y * targetWidth + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const l = 0.299 * r + 0.587 * g + 0.114 * b;
+        lum[y * targetWidth + x] = l;
+      }
+    }
+
+    // Sobel-like gradients
+    for (let y = 1; y < targetHeight - 1; y++) {
+      for (let x = 1; x < targetWidth - 1; x++) {
+        const c = y * targetWidth + x;
+        gradX[c] = Math.abs(lum[c - 1] - lum[c + 1]);
+        gradY[c] = Math.abs(lum[(y - 1) * targetWidth + x] - lum[(y + 1) * targetWidth + x]);
+      }
+    }
+
+    // Adaptive luminance threshold (percentile from histogram)
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < lum.length; i++) {
+      hist[Math.round(lum[i])]++;
+    }
+    let total = 0;
+    const totalPixels = targetWidth * targetHeight;
+    let adaptiveThreshold = 240;
+    for (let i = 255; i >= 0; i--) {
+      total += hist[i];
+      if (total >= totalPixels * 0.12) {
+        adaptiveThreshold = i;
+        break;
+      }
+    }
+    adaptiveThreshold = Math.max(200, Math.min(250, adaptiveThreshold));
+
+    // Build three binary maps:
+    // whiteMap: bright regions (gutters between panels)
+    // edgeMap: strong horizontal/vertical edges (panel borders)
+    const whiteMap = new Uint8Array(targetWidth * targetHeight);
+    const hEdgeMap = new Uint8Array(targetWidth * targetHeight);
+    const vEdgeMap = new Uint8Array(targetWidth * targetHeight);
+
+    for (let y = 0; y < targetHeight; y++) {
+      const isNearY = y < marginY || y >= targetHeight - marginY;
+      for (let x = 0; x < targetWidth; x++) {
+        const c = y * targetWidth + x;
+        const isNearX = x < marginX || x >= targetWidth - marginX;
         if (isNearY || isNearX) {
-          // Treat borders as white space to neutralize scan border lines
-          grid[y][x] = true;
+          whiteMap[c] = 1;
         } else {
-          const idx = (y * targetWidth + x) * 4;
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
-          const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-          grid[y][x] = luminance >= gutterThreshold;
+          whiteMap[c] = lum[c] >= adaptiveThreshold ? 1 : 0;
         }
+        hEdgeMap[c] = gradY[c] > 50 ? 1 : 0;
+        vEdgeMap[c] = gradX[c] > 50 ? 1 : 0;
       }
     }
 
-    // 1. Horizontal projection (which rows are gutters?)
-    const horizontalWhiteness = new Array(targetHeight).fill(0);
+    // Combine white + edge into a gutter map.
+    // A pixel is "gutter" if it's white OR if it's a strong horizontal/vertical edge
+    // (since panel borders often appear as dark lines, not white gaps)
+    const gutterMap = new Uint8Array(targetWidth * targetHeight);
+    for (let i = 0; i < gutterMap.length; i++) {
+      gutterMap[i] = whiteMap[i] || hEdgeMap[i] || vEdgeMap[i] ? 1 : 0;
+    }
+
+    // Morphological close: dilate then erode to fill small gaps in gutters
+    const dilated = morphDilate(gutterMap, targetWidth, targetHeight, 3);
+    const closed = morphErode(dilated, targetWidth, targetHeight, 3);
+
+    // Now use the cleaned map for projection analysis
+    const hGutterRows = new Uint8Array(targetHeight);
     for (let y = 0; y < targetHeight; y++) {
-      let whiteCount = 0;
+      let gutterCount = 0;
       for (let x = 0; x < targetWidth; x++) {
-        if (grid[y][x]) whiteCount++;
+        if (closed[y * targetWidth + x]) gutterCount++;
       }
-      horizontalWhiteness[y] = whiteCount / targetWidth;
+      const ratio = gutterCount / targetWidth;
+
+      // Adaptive sensitivity: use a lower threshold for the middle portion
+      // where the page is less likely to have border artifacts
+      const isInner = y > marginY * 2 && y < targetHeight - marginY * 2;
+      const sensitivity = isInner ? 0.88 : 0.95;
+      hGutterRows[y] = ratio >= sensitivity ? 1 : 0;
     }
 
-    // Identify horizontal cuts
-    const hGutterRows: boolean[] = [];
-    for (let y = 0; y < targetHeight; y++) {
-      hGutterRows[y] = horizontalWhiteness[y] >= splitSensitivity;
+    // Smooth gutter rows: a single non-gutter row between gutter rows is still a gutter
+    for (let y = 1; y < targetHeight - 1; y++) {
+      if (hGutterRows[y - 1] && hGutterRows[y + 1] && !hGutterRows[y]) {
+        hGutterRows[y] = 1;
+      }
     }
 
-    // Group rows into non-gutter slices (horizontal segments containing panel rows)
-    interface Segment {
-      start: number;
-      end: number;
-    }
-    const hSegments: Segment[] = [];
-    let inSegment = false;
-    let segStart = 0;
-
-    for (let y = 0; y < targetHeight; y++) {
-      if (!hGutterRows[y]) {
-        if (!inSegment) {
+    // Extract horizontal segments (panel rows)
+    const hSegments: { start: number; end: number }[] = [];
+    {
+      let inGutter = true;
+      let segStart = 0;
+      for (let y = 0; y < targetHeight; y++) {
+        if (!hGutterRows[y] && inGutter) {
           segStart = y;
-          inSegment = true;
-        }
-      } else {
-        if (inSegment) {
-          hSegments.push({ start: segStart, end: y - 1 });
-          inSegment = false;
+          inGutter = false;
+        } else if (hGutterRows[y] && !inGutter) {
+          if (y - segStart >= targetHeight * minPanelSizePercent / 100) {
+            hSegments.push({ start: segStart, end: y - 1 });
+          }
+          inGutter = true;
         }
       }
-    }
-    if (inSegment) {
-      hSegments.push({ start: segStart, end: targetHeight - 1 });
+      if (!inGutter && targetHeight - segStart >= targetHeight * minPanelSizePercent / 100) {
+        hSegments.push({ start: segStart, end: targetHeight - 1 });
+      }
     }
 
-    const detectedBoxes: { ymin: number; xmin: number; ymax: number; xmax: number }[] = [];
+    const detectedBoxes: Box[] = [];
 
-    // 2. For each horizontal segment, run vertical projection to locate individual panels
     for (const hSeg of hSegments) {
       const segHeight = hSeg.end - hSeg.start + 1;
-      if (segHeight < (targetHeight * minPanelSizePercent) / 100) continue;
+      if (segHeight < targetHeight * minPanelSizePercent / 100) continue;
 
-      const verticalWhiteness = new Array(targetWidth).fill(0);
+      // Vertical projection within the row
+      const vGutter = new Uint8Array(targetWidth);
       for (let x = 0; x < targetWidth; x++) {
-        let whiteCount = 0;
+        let gutterCount = 0;
         for (let y = hSeg.start; y <= hSeg.end; y++) {
-          if (grid[y][x]) whiteCount++;
+          if (closed[y * targetWidth + x]) gutterCount++;
         }
-        verticalWhiteness[x] = whiteCount / segHeight;
+        vGutter[x] = (gutterCount / segHeight) >= 0.85 ? 1 : 0;
       }
 
-      const vGutterCols: boolean[] = [];
-      for (let x = 0; x < targetWidth; x++) {
-        vGutterCols[x] = verticalWhiteness[x] >= splitSensitivity;
-      }
-
-      // Group columns into panel segments
-      let inColSeg = false;
-      let colStart = 0;
-      const vSegments: Segment[] = [];
-
-      for (let x = 0; x < targetWidth; x++) {
-        if (!vGutterCols[x]) {
-          if (!inColSeg) {
-            colStart = x;
-            inColSeg = true;
-          }
-        } else {
-          if (inColSeg) {
-            vSegments.push({ start: colStart, end: x - 1 });
-            inColSeg = false;
-          }
+      // Close small gaps in vertical gutters (1-pixel columns of content between gutter cols)
+      for (let x = 1; x < targetWidth - 1; x++) {
+        if (vGutter[x - 1] && vGutter[x + 1] && !vGutter[x]) {
+          vGutter[x] = 1;
         }
       }
-      if (inColSeg) {
-        vSegments.push({ start: colStart, end: targetWidth - 1 });
+
+      // Extract vertical segments (individual panels in the row)
+      const vSegments: { start: number; end: number }[] = [];
+      let inGutter = true;
+      let segStart = 0;
+      for (let x = 0; x < targetWidth; x++) {
+        if (!vGutter[x] && inGutter) {
+          segStart = x;
+          inGutter = false;
+        } else if (vGutter[x] && !inGutter) {
+          if (x - segStart >= targetWidth * minPanelSizePercent / 100) {
+            vSegments.push({ start: segStart, end: x - 1 });
+          }
+          inGutter = true;
+        }
+      }
+      if (!inGutter && targetWidth - segStart >= targetWidth * minPanelSizePercent / 100) {
+        vSegments.push({ start: segStart, end: targetWidth - 1 });
       }
 
-      // Add detected panel rectangles for this row segment
       for (const vSeg of vSegments) {
-        const segWidth = vSeg.end - vSeg.start + 1;
-        if (segWidth < (targetWidth * minPanelSizePercent) / 100) continue;
-
-        // Convert coordinates back to 0-1000 percentage space
-        const ymin = Math.round((hSeg.start / targetHeight) * 1000);
-        const xmin = Math.round((vSeg.start / targetWidth) * 1000);
-        const ymax = Math.round((hSeg.end / targetHeight) * 1000);
-        const xmax = Math.round((vSeg.end / targetWidth) * 1000);
-
-        detectedBoxes.push({ ymin, xmin, ymax, xmax });
+        detectedBoxes.push({
+          ymin: Math.round((hSeg.start / targetHeight) * 1000),
+          xmin: Math.round((vSeg.start / targetWidth) * 1000),
+          ymax: Math.round((hSeg.end / targetHeight) * 1000),
+          xmax: Math.round((vSeg.end / targetWidth) * 1000),
+        });
       }
     }
 
-    // 3. Manga reading order sorting (Right-to-Left, Top-to-Bottom)
-    // We group boxes into row levels using 35% vertical intersection overlap.
-    // This is vastly smarter than a simple 8% static tolerance check.
-    const sortedBoxes: typeof detectedBoxes = [];
-    const remainingBoxes = [...detectedBoxes];
-
-    while (remainingBoxes.length > 0) {
-      // Find the top-most box remaining
-      remainingBoxes.sort((a, b) => a.ymin - b.ymin);
-      const topBox = remainingBoxes[0];
-      
-      // Filter remaining boxes to locate any that share a substantial vertical intersection (row overlap)
-      const rowBoxes = remainingBoxes.filter((b) => {
-        const overlapY = Math.max(0, Math.min(b.ymax, topBox.ymax) - Math.max(b.ymin, topBox.ymin));
-        const minHeight = Math.min(b.ymax - b.ymin, topBox.ymax - topBox.ymin);
-        const overlapRatio = minHeight > 0 ? overlapY / minHeight : 0;
-        return overlapRatio >= 0.35; // Shared horizontal row if vertical overlap is >= 35%
-      });
-
-      // Sort row boxes Right-to-Left (Japanese manga order)
-      rowBoxes.sort((a, b) => b.xmin - a.xmin);
-
-      // Append sorted tier boxes and remove from remaining pool
-      for (const box of rowBoxes) {
-        sortedBoxes.push(box);
-        const idx = remainingBoxes.indexOf(box);
-        if (idx > -1) remainingBoxes.splice(idx, 1);
-      }
-    }
-
-    // If no panels detected or page is solid, fallback to a full page panel
-    if (sortedBoxes.length === 0) {
+    // Fallback
+    if (detectedBoxes.length === 0) {
       return [{ id: 1, box: [0, 0, 1000, 1000] }];
     }
 
-    // Return panels mapped to standard format
-    return sortedBoxes.map((box, idx) => ({
+    // Merge very small adjacent boxes that likely belong together
+    const merged = mergeSmallBoxes(detectedBoxes, targetWidth, targetHeight);
+
+    // Manga reading order: RTL + TTB
+    const sorted = sortRTL(merged);
+
+    return sorted.map((box, idx) => ({
       id: idx + 1,
       box: [box.ymin, box.xmin, box.ymax, box.xmax],
     }));
   } catch (err) {
-    console.warn("Client panel detection heuristic failed, using 2x2 grid", err);
+    console.warn("Panel detection failed, using grid fallback", err);
     return createGridPanels(2, 2);
   }
+}
+
+function morphDilate(
+  map: Uint8Array,
+  w: number,
+  h: number,
+  size: number
+): Uint8Array {
+  const out = new Uint8Array(map);
+  const half = Math.floor(size / 2);
+  for (let y = half; y < h - half; y++) {
+    for (let x = half; x < w - half; x++) {
+      if (map[y * w + x]) {
+        for (let dy = -half; dy <= half; dy++) {
+          for (let dx = -half; dx <= half; dx++) {
+            out[(y + dy) * w + (x + dx)] = 1;
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function morphErode(
+  map: Uint8Array,
+  w: number,
+  h: number,
+  size: number
+): Uint8Array {
+  const out = new Uint8Array(w * h);
+  const half = Math.floor(size / 2);
+  for (let y = half; y < h - half; y++) {
+    for (let x = half; x < w - half; x++) {
+      let all = true;
+      for (let dy = -half; dy <= half; dy++) {
+        for (let dx = -half; dx <= half; dx++) {
+          if (!map[(y + dy) * w + (x + dx)]) {
+            all = false;
+            break;
+          }
+        }
+        if (!all) break;
+      }
+      out[y * w + x] = all ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+function mergeSmallBoxes(
+  boxes: Box[],
+  imgW: number,
+  imgH: number
+): Box[] {
+  if (boxes.length <= 1) return boxes;
+
+  const minSize = 0.03; // 3% of page dimension
+  const minW = imgW * minSize;
+  const minH = imgH * minSize;
+
+  let result = boxes.map((b) => ({ ...b }));
+
+  // Convert from 0-1000 back to pixel coords for comparison
+  const toPix = (val: number, dim: number) => Math.round((val / 1000) * dim);
+  const toRel = (val: number, dim: number) => Math.round((val / dim) * 1000);
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const newResult: Box[] = [];
+
+    for (let i = 0; i < result.length; i++) {
+      let merged = false;
+      const a = result[i];
+      const aW = toPix(a.xmax - a.xmin, imgW);
+      const aH = toPix(a.ymax - a.ymin, imgH);
+
+      // Skip merging for already-large boxes
+      if (aW >= minW && aH >= minH) {
+        newResult.push(a);
+        continue;
+      }
+
+      for (let j = 0; j < result.length; j++) {
+        if (i === j) continue;
+        const b = result[j];
+        // Check if they're adjacent (within 5% of each other)
+        const adjX = Math.abs(toPix(a.xmin, imgW) - toPix(b.xmax, imgW)) < imgW * 0.05 ||
+                     Math.abs(toPix(a.xmax, imgW) - toPix(b.xmin, imgW)) < imgW * 0.05;
+        const adjY = Math.abs(toPix(a.ymin, imgH) - toPix(b.ymax, imgH)) < imgH * 0.05 ||
+                     Math.abs(toPix(a.ymax, imgH) - toPix(b.ymin, imgH)) < imgH * 0.05;
+
+        if (adjX || adjY) {
+          // Merge: take the bounding box
+          const mergedBox: Box = {
+            ymin: Math.min(a.ymin, b.ymin),
+            xmin: Math.min(a.xmin, b.xmin),
+            ymax: Math.max(a.ymax, b.ymax),
+            xmax: Math.max(a.xmax, b.xmax),
+          };
+          newResult.push(mergedBox);
+          // Mark b as consumed
+          result[j] = { ymin: -1, xmin: -1, ymax: -1, xmax: -1 };
+          merged = true;
+          changed = true;
+          break;
+        }
+      }
+      if (!merged) {
+        newResult.push(a);
+      }
+    }
+
+    result = newResult.filter((b) => b.ymin >= 0);
+  }
+
+  return result;
+}
+
+function sortRTL(boxes: Box[]): Box[] {
+  if (boxes.length <= 1) return boxes;
+
+  const sorted: Box[] = [];
+  const remaining = boxes.map((b) => ({ ...b }));
+
+  while (remaining.length > 0) {
+    // Find the topmost box
+    remaining.sort((a, b) => a.ymin - b.ymin);
+    const topBox = remaining[0];
+
+    // Collect all boxes in the same row (vertical overlap >= 30%)
+    const rowBoxes = remaining.filter((b) => {
+      const overlapY = Math.max(0, Math.min(b.ymax, topBox.ymax) - Math.max(b.ymin, topBox.ymin));
+      const minHeight = Math.min(b.ymax - b.ymin, topBox.ymax - topBox.ymin);
+      return minHeight > 0 && (overlapY / minHeight) >= 0.30;
+    });
+
+    // Sort row right-to-left
+    rowBoxes.sort((a, b) => b.xmin - a.xmin);
+
+    for (const box of rowBoxes) {
+      sorted.push(box);
+      const idx = remaining.indexOf(box);
+      if (idx > -1) remaining.splice(idx, 1);
+    }
+  }
+
+  return sorted;
 }
 
 /**
@@ -233,7 +411,7 @@ export function createGridPanels(rows: number, cols: number): Panel[] {
     const ymin = r * hStep;
     const ymax = r === rows - 1 ? 1000 : (r + 1) * hStep;
 
-    // For Manga reading: Right-to-Left order inside the row
+    // Manga order: Right-to-Left
     for (let c = cols - 1; c >= 0; c--) {
       const xmin = c * wStep;
       const xmax = c === cols - 1 ? 1000 : (c + 1) * wStep;
