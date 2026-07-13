@@ -192,6 +192,20 @@ async function detectPanelsHeuristicInner(
     const dilated = morphDilate(gutterMap, targetWidth, targetHeight, 3);
     const closed = morphErode(dilated, targetWidth, targetHeight, 3);
 
+    // Text protection: captions/dialogue are mostly white space with thin
+    // dark letters, so the white-space *between* letters and words easily
+    // clears the gutter threshold above and gets misread as a gap between
+    // panels — cutting a panel off mid-sentence (and often mid-artwork,
+    // since the false split anchors wherever the text happens to sit).
+    // Find glyph-sized dark marks, bridge the gaps between them into whole
+    // words/lines/caption blocks, and force that whole area to count as
+    // solid content no matter how white the surrounding gutter map says it
+    // is.
+    const textProtect = buildTextProtectMask(lum, targetWidth, targetHeight);
+    for (let i = 0; i < closed.length; i++) {
+      if (textProtect[i]) closed[i] = 0;
+    }
+
     // Row/column gutter-detection sensitivity. The user's splitSensitivity
     // knob (0-1, higher = stricter about what counts as a gutter) now
     // actually feeds into these thresholds instead of being ignored.
@@ -355,6 +369,144 @@ function computeAdaptiveEdgeThreshold(grad: Float32Array): number {
     }
   }
   return clamp(threshold, 25, 90);
+}
+
+interface CCBox {
+  xmin: number;
+  ymin: number;
+  xmax: number;
+  ymax: number;
+  area: number;
+}
+
+// Finds connected components of "ink" (dark) pixels and returns only the
+// ones shaped/sized like individual glyphs — small, roughly compact blobs.
+// Large connected regions (panel border lines, solid shadows, character
+// linework) are walked just far enough to confirm they're too big, then
+// abandoned early rather than fully traced, since we only care about
+// keeping the small ones.
+function findGlyphComponents(
+  ink: Uint8Array,
+  w: number,
+  h: number,
+  maxGlyphW: number,
+  maxGlyphH: number,
+  minArea: number
+): CCBox[] {
+  const visited = new Uint8Array(w * h);
+  const boxes: CCBox[] = [];
+  const stack: number[] = [];
+  const areaBailout = minArea * 60; // comfortably bigger than any real glyph
+
+  for (let start = 0; start < ink.length; start++) {
+    if (!ink[start] || visited[start]) continue;
+
+    let xmin = start % w;
+    let xmax = xmin;
+    let ymin = (start / w) | 0;
+    let ymax = ymin;
+    let area = 0;
+    let tooBig = false;
+
+    stack.length = 0;
+    stack.push(start);
+    visited[start] = 1;
+
+    while (stack.length) {
+      const idx = stack.pop() as number;
+      const x = idx % w;
+      const y = (idx / w) | 0;
+      area++;
+      if (x < xmin) xmin = x;
+      if (x > xmax) xmax = x;
+      if (y < ymin) ymin = y;
+      if (y > ymax) ymax = y;
+
+      if (area > areaBailout) {
+        tooBig = true;
+        break;
+      }
+
+      if (x > 0 && ink[idx - 1] && !visited[idx - 1]) { visited[idx - 1] = 1; stack.push(idx - 1); }
+      if (x < w - 1 && ink[idx + 1] && !visited[idx + 1]) { visited[idx + 1] = 1; stack.push(idx + 1); }
+      if (y > 0 && ink[idx - w] && !visited[idx - w]) { visited[idx - w] = 1; stack.push(idx - w); }
+      if (y < h - 1 && ink[idx + w] && !visited[idx + w]) { visited[idx + w] = 1; stack.push(idx + w); }
+    }
+
+    if (tooBig) continue;
+
+    const boxW = xmax - xmin + 1;
+    const boxH = ymax - ymin + 1;
+    if (area >= minArea && boxW <= maxGlyphW && boxH <= maxGlyphH) {
+      boxes.push({ xmin, ymin, xmax, ymax, area });
+    }
+  }
+
+  return boxes;
+}
+
+// Cheap separable dilation (two 1D passes instead of one 2D pass) — needed
+// because bridging word/line gaps requires a much larger kernel than the
+// noise cleanup dilation above, and a non-separable version at that size
+// would be far too slow to run per-page.
+function dilateSeparable(map: Uint8Array, w: number, h: number, size: number): Uint8Array {
+  const half = Math.floor(size / 2);
+  const temp = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let v = 0;
+      for (let dx = -half; dx <= half; dx++) {
+        const xx = x + dx;
+        if (xx >= 0 && xx < w && map[row + xx]) { v = 1; break; }
+      }
+      temp[row + x] = v;
+    }
+  }
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let v = 0;
+      for (let dy = -half; dy <= half; dy++) {
+        const yy = y + dy;
+        if (yy >= 0 && yy < h && temp[yy * w + x]) { v = 1; break; }
+      }
+      out[y * w + x] = v;
+    }
+  }
+  return out;
+}
+
+// Builds a mask of "this is text, never split here" pixels: glyph-sized
+// dark marks, expanded so letters fuse into words, words fuse into lines,
+// and nearby lines of a caption/dialogue block fuse into one solid region.
+function buildTextProtectMask(lum: Float32Array, w: number, h: number): Uint8Array {
+  const ink = new Uint8Array(w * h);
+  for (let i = 0; i < ink.length; i++) {
+    ink[i] = lum[i] < 190 ? 1 : 0;
+  }
+
+  const maxGlyphW = Math.max(6, Math.round(w * 0.035));
+  const maxGlyphH = Math.max(6, Math.round(h * 0.035));
+  const minArea = 3;
+
+  const glyphBoxes = findGlyphComponents(ink, w, h, maxGlyphW, maxGlyphH, minArea);
+  const mask = new Uint8Array(w * h);
+  if (glyphBoxes.length === 0) return mask;
+
+  for (const b of glyphBoxes) {
+    for (let y = b.ymin; y <= b.ymax; y++) {
+      const row = y * w;
+      for (let x = b.xmin; x <= b.xmax; x++) {
+        mask[row + x] = 1;
+      }
+    }
+  }
+
+  // Bridge letter/word/line gaps. Sized relative to page width so it scales
+  // with typical caption font sizes rather than being a fixed pixel count.
+  const bridgeSize = Math.max(5, Math.round(w * 0.03));
+  return dilateSeparable(mask, w, h, bridgeSize);
 }
 
 function morphDilate(
