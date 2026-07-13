@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { 
   Compass, 
   FolderOpen, 
@@ -9,7 +9,8 @@ import {
   ChevronLeft,
   ChevronRight,
   HelpCircle,
-  Library
+  Library,
+  Fullscreen
 } from "lucide-react";
 import SourceManager from "./components/SourceManager";
 import LocalReader from "./components/LocalReader";
@@ -68,6 +69,23 @@ export default function App() {
     setReadingChapter({ ...readingChapter, pages: updatedPages });
   };
 
+  const handleToggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.getElementById("immersive-canvas")?.requestFullscreen();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!readingManga) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "f" || e.key === "F") handleToggleFullscreen();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [readingManga, handleToggleFullscreen]);
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#e0e0e0] flex flex-col font-sans select-none" id="app-wrapper">
       
@@ -118,6 +136,16 @@ export default function App() {
                 className="p-1.5 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded text-white/80 transition-opacity"
               >
                 <ChevronRight className="w-4 h-4" />
+              </button>
+
+              <div className="w-px h-5 bg-white/10 mx-1" />
+
+              <button
+                onClick={handleToggleFullscreen}
+                className="p-1.5 bg-white/5 hover:bg-white/10 rounded text-white/80 transition-opacity"
+                title="Toggle fullscreen (F)"
+              >
+                <Fullscreen className="w-4 h-4" />
               </button>
             </div>
           </div>
