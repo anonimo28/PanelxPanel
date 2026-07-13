@@ -17,24 +17,61 @@ interface Box {
   xmax: number;
 }
 
+type DetectOptions = {
+  gutterThreshold?: number;
+  splitSensitivity?: number;
+  minPanelSizePercent?: number;
+};
+
+// In-memory cache so re-navigating to a page (or re-rendering a component)
+// doesn't redo the full pixel scan. Keyed by image URL + the tuning options
+// used, since different options can legitimately produce different results.
+// Failed detections are not cached, so retries are still possible.
+const detectionCache = new Map<string, Promise<Panel[]>>();
+
+export function clearPanelDetectionCache(imageUrl?: string): void {
+  if (!imageUrl) {
+    detectionCache.clear();
+    return;
+  }
+  for (const key of Array.from(detectionCache.keys())) {
+    if (key.startsWith(`${imageUrl}::`)) detectionCache.delete(key);
+  }
+}
+
 /**
  * Multi-pass panel detection algorithm combining:
- * 1. Adaptive luminance threshold + edge detection
+ * 1. Adaptive luminance threshold + adaptive edge detection
  * 2. Projection-profile analysis with adaptive sensitivity
  * 3. Morphological cleanup and noise rejection
  * 4. Smart RTL tier grouping
+ *
+ * `gutterThreshold` and `splitSensitivity` are user-tunable knobs (surfaced
+ * in the manual-tuning UI); both now actually affect the algorithm.
  */
 export async function detectPanelsHeuristic(
   imageUrl: string,
-  options: {
-    gutterThreshold?: number;
-    splitSensitivity?: number;
-    minPanelSizePercent?: number;
-  } = {}
+  options: DetectOptions = {}
+): Promise<Panel[]> {
+  const cacheKey = `${imageUrl}::${JSON.stringify(options)}`;
+  const cached = detectionCache.get(cacheKey);
+  if (cached) return cached;
+
+  const resultPromise = detectPanelsHeuristicInner(imageUrl, options);
+  // Don't cache rejected promises — a transient failure (e.g. network hiccup
+  // loading the image) shouldn't be permanently remembered as "no panels".
+  resultPromise.catch(() => detectionCache.delete(cacheKey));
+  detectionCache.set(cacheKey, resultPromise);
+  return resultPromise;
+}
+
+async function detectPanelsHeuristicInner(
+  imageUrl: string,
+  options: DetectOptions
 ): Promise<Panel[]> {
   const {
-    gutterThreshold: _userThreshold,
-    splitSensitivity: _userSensitivity,
+    gutterThreshold: userThreshold,
+    splitSensitivity: userSensitivity,
     minPanelSizePercent = 4,
   } = options;
 
@@ -42,14 +79,14 @@ export async function detectPanelsHeuristic(
     const img = await loadImage(imageUrl);
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
-    if (!ctx) return createGridPanels(2, 2);
+    if (!ctx) return fullPageFallback();
 
     const targetWidth = 500;
     const targetHeight = Math.round((img.height / img.width) * targetWidth);
     canvas.width = targetWidth;
     canvas.height = targetHeight;
-
     ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
     const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
     const data = imgData.data;
 
@@ -97,6 +134,25 @@ export async function detectPanelsHeuristic(
       }
     }
     adaptiveThreshold = Math.max(200, Math.min(250, adaptiveThreshold));
+    // Let the user's gutter-threshold knob override the computed value.
+    if (userThreshold !== undefined) {
+      adaptiveThreshold = Math.max(150, Math.min(255, userThreshold));
+    }
+    // Slightly relaxed threshold used only for margin pixels (see whiteMap
+    // below) so faint scan-border noise still reads as gutter without
+    // forcing genuinely full-bleed art at the page edge to be clipped.
+    const marginThreshold = Math.max(180, adaptiveThreshold - 30);
+
+    // Adaptive edge threshold: instead of a flat magic-number cutoff, use
+    // the strongest ~6% of gradient magnitudes on THIS page as "edges".
+    // Low-contrast/heavily-screentoned pages naturally get a lower cutoff;
+    // high-contrast line art gets a higher one, instead of over/under
+    // detecting borders with a one-size-fits-all constant.
+    const gradMagnitude = new Float32Array(targetWidth * targetHeight);
+    for (let i = 0; i < gradMagnitude.length; i++) {
+      gradMagnitude[i] = Math.max(gradX[i], gradY[i]);
+    }
+    const edgeThreshold = computeAdaptiveEdgeThreshold(gradMagnitude);
 
     // Build three binary maps:
     // whiteMap: bright regions (gutters between panels)
@@ -110,13 +166,17 @@ export async function detectPanelsHeuristic(
       for (let x = 0; x < targetWidth; x++) {
         const c = y * targetWidth + x;
         const isNearX = x < marginX || x >= targetWidth - marginX;
+
         if (isNearY || isNearX) {
-          whiteMap[c] = 1;
+          // Near the page edge: only count as gutter if it's actually
+          // near-uniform/bright. Previously this was forced to 1
+          // unconditionally, which silently cropped full-bleed panels.
+          whiteMap[c] = lum[c] >= marginThreshold ? 1 : 0;
         } else {
           whiteMap[c] = lum[c] >= adaptiveThreshold ? 1 : 0;
         }
-        hEdgeMap[c] = gradY[c] > 50 ? 1 : 0;
-        vEdgeMap[c] = gradX[c] > 50 ? 1 : 0;
+        hEdgeMap[c] = gradY[c] > edgeThreshold ? 1 : 0;
+        vEdgeMap[c] = gradX[c] > edgeThreshold ? 1 : 0;
       }
     }
 
@@ -132,6 +192,19 @@ export async function detectPanelsHeuristic(
     const dilated = morphDilate(gutterMap, targetWidth, targetHeight, 3);
     const closed = morphErode(dilated, targetWidth, targetHeight, 3);
 
+    // Row/column gutter-detection sensitivity. The user's splitSensitivity
+    // knob (0-1, higher = stricter about what counts as a gutter) now
+    // actually feeds into these thresholds instead of being ignored.
+    const baseInnerSensitivity = userSensitivity !== undefined
+      ? clamp(userSensitivity, 0.5, 0.99)
+      : 0.88;
+    const baseMarginSensitivity = userSensitivity !== undefined
+      ? clamp(userSensitivity + 0.07, 0.5, 0.99)
+      : 0.95;
+    const columnSensitivity = userSensitivity !== undefined
+      ? clamp(userSensitivity - 0.03, 0.5, 0.99)
+      : 0.85;
+
     // Now use the cleaned map for projection analysis
     const hGutterRows = new Uint8Array(targetHeight);
     for (let y = 0; y < targetHeight; y++) {
@@ -140,11 +213,10 @@ export async function detectPanelsHeuristic(
         if (closed[y * targetWidth + x]) gutterCount++;
       }
       const ratio = gutterCount / targetWidth;
-
       // Adaptive sensitivity: use a lower threshold for the middle portion
       // where the page is less likely to have border artifacts
       const isInner = y > marginY * 2 && y < targetHeight - marginY * 2;
-      const sensitivity = isInner ? 0.88 : 0.95;
+      const sensitivity = isInner ? baseInnerSensitivity : baseMarginSensitivity;
       hGutterRows[y] = ratio >= sensitivity ? 1 : 0;
     }
 
@@ -165,13 +237,13 @@ export async function detectPanelsHeuristic(
           segStart = y;
           inGutter = false;
         } else if (hGutterRows[y] && !inGutter) {
-          if (y - segStart >= targetHeight * minPanelSizePercent / 100) {
+          if (y - segStart >= (targetHeight * minPanelSizePercent) / 100) {
             hSegments.push({ start: segStart, end: y - 1 });
           }
           inGutter = true;
         }
       }
-      if (!inGutter && targetHeight - segStart >= targetHeight * minPanelSizePercent / 100) {
+      if (!inGutter && targetHeight - segStart >= (targetHeight * minPanelSizePercent) / 100) {
         hSegments.push({ start: segStart, end: targetHeight - 1 });
       }
     }
@@ -180,7 +252,7 @@ export async function detectPanelsHeuristic(
 
     for (const hSeg of hSegments) {
       const segHeight = hSeg.end - hSeg.start + 1;
-      if (segHeight < targetHeight * minPanelSizePercent / 100) continue;
+      if (segHeight < (targetHeight * minPanelSizePercent) / 100) continue;
 
       // Vertical projection within the row
       const vGutter = new Uint8Array(targetWidth);
@@ -189,7 +261,7 @@ export async function detectPanelsHeuristic(
         for (let y = hSeg.start; y <= hSeg.end; y++) {
           if (closed[y * targetWidth + x]) gutterCount++;
         }
-        vGutter[x] = (gutterCount / segHeight) >= 0.85 ? 1 : 0;
+        vGutter[x] = gutterCount / segHeight >= columnSensitivity ? 1 : 0;
       }
 
       // Close small gaps in vertical gutters (1-pixel columns of content between gutter cols)
@@ -208,13 +280,13 @@ export async function detectPanelsHeuristic(
           segStart = x;
           inGutter = false;
         } else if (vGutter[x] && !inGutter) {
-          if (x - segStart >= targetWidth * minPanelSizePercent / 100) {
+          if (x - segStart >= (targetWidth * minPanelSizePercent) / 100) {
             vSegments.push({ start: segStart, end: x - 1 });
           }
           inGutter = true;
         }
       }
-      if (!inGutter && targetWidth - segStart >= targetWidth * minPanelSizePercent / 100) {
+      if (!inGutter && targetWidth - segStart >= (targetWidth * minPanelSizePercent) / 100) {
         vSegments.push({ start: segStart, end: targetWidth - 1 });
       }
 
@@ -230,7 +302,7 @@ export async function detectPanelsHeuristic(
 
     // Fallback
     if (detectedBoxes.length === 0) {
-      return [{ id: 1, box: [0, 0, 1000, 1000] }];
+      return fullPageFallback();
     }
 
     // Merge very small adjacent boxes that likely belong together
@@ -244,9 +316,45 @@ export async function detectPanelsHeuristic(
       box: [box.ymin, box.xmin, box.ymax, box.xmax],
     }));
   } catch (err) {
-    console.warn("Panel detection failed, using grid fallback", err);
-    return createGridPanels(2, 2);
+    console.warn("Panel detection failed, using full-page fallback", err);
+    // A fixed 2x2 grid used to be assumed here for every failure, which is
+    // frequently wrong (e.g. single-panel splash pages) and actively worse
+    // than just showing the whole page. Full-page is a safer default;
+    // createGridPanels remains available for explicit manual grid mode.
+    return fullPageFallback();
   }
+}
+
+function fullPageFallback(): Panel[] {
+  return [{ id: 1, box: [0, 0, 1000, 1000] }];
+}
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, val));
+}
+
+function computeAdaptiveEdgeThreshold(grad: Float32Array): number {
+  const maxVal = 255;
+  const hist = new Uint32Array(maxVal + 1);
+  for (let i = 0; i < grad.length; i++) {
+    const v = Math.min(maxVal, Math.round(grad[i]));
+    hist[v]++;
+  }
+  const totalPixels = grad.length;
+  // Treat roughly the strongest 6% of gradient magnitudes on the page as
+  // "edges". This scales with the page's own contrast instead of using a
+  // single hardcoded magnitude for every page.
+  const targetCount = totalPixels * 0.06;
+  let total = 0;
+  let threshold = 50;
+  for (let i = maxVal; i >= 0; i--) {
+    total += hist[i];
+    if (total >= targetCount) {
+      threshold = i;
+      break;
+    }
+  }
+  return clamp(threshold, 25, 90);
 }
 
 function morphDilate(
@@ -297,6 +405,17 @@ function morphErode(
   return out;
 }
 
+function boxesOverlapOnAxis(
+  a: Box,
+  b: Box,
+  axis: "x" | "y"
+): boolean {
+  if (axis === "y") {
+    return Math.max(0, Math.min(a.ymax, b.ymax) - Math.max(a.ymin, b.ymin)) > 0;
+  }
+  return Math.max(0, Math.min(a.xmax, b.xmax) - Math.max(a.xmin, b.xmin)) > 0;
+}
+
 function mergeSmallBoxes(
   boxes: Box[],
   imgW: number,
@@ -312,7 +431,6 @@ function mergeSmallBoxes(
 
   // Convert from 0-1000 back to pixel coords for comparison
   const toPix = (val: number, dim: number) => Math.round((val / 1000) * dim);
-  const toRel = (val: number, dim: number) => Math.round((val / dim) * 1000);
 
   let changed = true;
   while (changed) {
@@ -334,13 +452,23 @@ function mergeSmallBoxes(
       for (let j = 0; j < result.length; j++) {
         if (i === j) continue;
         const b = result[j];
+
         // Check if they're adjacent (within 5% of each other)
         const adjX = Math.abs(toPix(a.xmin, imgW) - toPix(b.xmax, imgW)) < imgW * 0.05 ||
-                     Math.abs(toPix(a.xmax, imgW) - toPix(b.xmin, imgW)) < imgW * 0.05;
+          Math.abs(toPix(a.xmax, imgW) - toPix(b.xmin, imgW)) < imgW * 0.05;
         const adjY = Math.abs(toPix(a.ymin, imgH) - toPix(b.ymax, imgH)) < imgH * 0.05 ||
-                     Math.abs(toPix(a.ymax, imgH) - toPix(b.ymin, imgH)) < imgH * 0.05;
+          Math.abs(toPix(a.ymax, imgH) - toPix(b.ymin, imgH)) < imgH * 0.05;
 
-        if (adjX || adjY) {
+        // A horizontal adjacency (adjX) only makes sense if the two boxes
+        // actually share vertical space (same row) — otherwise you can end
+        // up merging two unrelated small panels that just happen to sit at
+        // similar x-positions in completely different rows, producing a
+        // giant bounding box. Same logic applies to adjY / shared column.
+        const sameRow = boxesOverlapOnAxis(a, b, "y");
+        const sameCol = boxesOverlapOnAxis(a, b, "x");
+        const shouldMerge = (adjX && sameRow) || (adjY && sameCol);
+
+        if (shouldMerge) {
           // Merge: take the bounding box
           const mergedBox: Box = {
             ymin: Math.min(a.ymin, b.ymin),
@@ -356,6 +484,7 @@ function mergeSmallBoxes(
           break;
         }
       }
+
       if (!merged) {
         newResult.push(a);
       }
@@ -382,7 +511,7 @@ function sortRTL(boxes: Box[]): Box[] {
     const rowBoxes = remaining.filter((b) => {
       const overlapY = Math.max(0, Math.min(b.ymax, topBox.ymax) - Math.max(b.ymin, topBox.ymin));
       const minHeight = Math.min(b.ymax - b.ymin, topBox.ymax - topBox.ymin);
-      return minHeight > 0 && (overlapY / minHeight) >= 0.30;
+      return minHeight > 0 && overlapY / minHeight >= 0.3;
     });
 
     // Sort row right-to-left
@@ -415,7 +544,6 @@ export function createGridPanels(rows: number, cols: number): Panel[] {
     for (let c = cols - 1; c >= 0; c--) {
       const xmin = c * wStep;
       const xmax = c === cols - 1 ? 1000 : (c + 1) * wStep;
-
       panels.push({
         id,
         box: [ymin, xmin, ymax, xmax],
@@ -423,5 +551,6 @@ export function createGridPanels(rows: number, cols: number): Panel[] {
       id++;
     }
   }
+
   return panels;
 }
