@@ -204,20 +204,14 @@ export default function PanelViewer({
     setCurrentPanelIndex(updated.length - 1);
   };
 
-  // Calculate the CSS transformation metrics for centering and scaling the panel
+  // Panel zoom: scale to show just the current panel, image stays centered
   const currentPanel = panels[currentPanelIndex] || { id: 1, box: [0, 0, 1000, 1000] };
   const [ymin, xmin, ymax, xmax] = currentPanel.box;
 
-  // Percentage values of current box (0 to 100%)
-  const cx = (xmin + xmax) / 20; 
-  const cy = (ymin + ymax) / 20;
   const pw = (xmax - xmin) / 10;
   const ph = (ymax - ymin) / 10;
 
-  // Fitting algorithm
   const scale = Math.max(1, Math.min(Math.min(100 / (pw || 1), 100 / (ph || 1)) * zoomCushion, 6));
-  const translateX = (50 - cx) * scale;
-  const translateY = (50 - cy) * scale;
 
   return (
     <div className="flex flex-col h-full bg-black text-gray-200 select-none overflow-hidden" id="panel-viewer-root">
@@ -495,8 +489,6 @@ export default function PanelViewer({
               className="w-full h-full flex items-center justify-center relative"
               animate={{
                 scale: scale,
-                x: `${translateX}%`,
-                y: `${translateY}%`,
               }}
               transition={{
                 type: "spring",
