@@ -73,84 +73,99 @@ const PAGE_IMAGES = [
   "https://images.unsplash.com/photo-1501785888041-af3ef285b470?w=800&q=80"
 ];
 
-const generateMangasForExtension = (extensionName: string, sourceId: string): Manga[] => {
-  const cleanName = extensionName.replace("Tachiyomi: ", "");
-  
-  // Custom titles depending on type of extension to make it look super authentic
-  let titles = [
-    `The Legends of ${cleanName}`,
-    `Reincarnated as a ${cleanName} Admin`,
-    `My Virtual Quest in ${cleanName}`,
-    `${cleanName} Chronicles: Rise of the Hero`,
-    `Shadow Sect of ${cleanName}`
-  ];
+function ExtensionDetails({ extension, onClose }: { extension: any; onClose: () => void }) {
+  if (!extension) return null;
 
-  if (cleanName.toLowerCase().includes("hentai") || cleanName.toLowerCase().includes("porn") || cleanName.toLowerCase().includes("babes")) {
-    titles = [
-      `Love & Ecchi Comedy in ${cleanName}`,
-      `Summer Romance of the Goddesses`,
-      `${cleanName} Beachside Hot Spring Log`,
-      `Parallel World Maid Cafe Secret`,
-      `Sensual Academy of Magic`
-    ];
-  } else if (cleanName.toLowerCase().includes("comic") || cleanName.toLowerCase().includes("kingdom")) {
-    titles = [
-      `Chronicles of the Dark Knight`,
-      `Indie Webcomic Anthology`,
-      `Superheroes of ${cleanName}`,
-      `Neon Cyberpunk Adventures`,
-      `The Emperor's New Alliance`
-    ];
-  } else if (cleanName.toLowerCase().includes("art") || cleanName.toLowerCase().includes("booru") || cleanName.toLowerCase().includes("gallery")) {
-    titles = [
-      `${cleanName} Illustration Yearbook`,
-      `Anime Poster & Concept Artbook`,
-      `Digital Speedpaint Masterclass`,
-      `Starlight Fantasy Pinup Collection`,
-      `Vintage Pixel Art Gallery`
-    ];
-  }
+  const sources = extension.sources || [];
+  const apkUrl = extension.apk || "";
 
-  const genres = [
-    ["Action", "Fantasy", "Adventure"],
-    ["Comedy", "Romance", "Harem"],
-    ["Sci-Fi", "Cyberpunk", "Mecha"],
-    ["Slice of Life", "School Life", "Drama"],
-    ["Mystery", "Supernatural", "Thriller"]
-  ];
+  return (
+    <div className="bg-[#121212] border border-white/10 rounded-2xl p-5 space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1.5 min-w-0">
+          <h3 className="font-extrabold text-lg text-white truncate">
+            {extension.name?.replace("Tachiyomi: ", "")}
+          </h3>
+          <div className="flex flex-wrap gap-1.5">
+            <span className="px-2 py-0.5 rounded bg-blue-500/15 border border-blue-500/20 text-[10px] text-blue-400 font-semibold uppercase">
+              {extension.lang || "?"}
+            </span>
+            {extension.nsfw ? (
+              <span className="px-2 py-0.5 rounded bg-red-500/15 border border-red-500/20 text-[10px] text-red-400 font-semibold uppercase">
+                NSFW
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded bg-green-500/15 border border-green-500/20 text-[10px] text-green-400 font-semibold uppercase">
+                Safe
+              </span>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-white/40 hover:text-white p-1"
+        >
+          ✕
+        </button>
+      </div>
 
-  return titles.map((title, index) => {
-    const coverUrl = COVER_IMAGES[index % COVER_IMAGES.length];
-    const author = ["Takashi Kuroda", "Yuka Sato", "Kenji Takahashi", "Shinji Mikami", "Akira Toriyama"][index % 5];
-    
-    // Generate chapters
-    const chapters: Chapter[] = Array.from({ length: 4 }, (_, chIndex) => {
-      const chNum = (chIndex + 1).toString();
-      return {
-        id: `${sourceId}-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${index}-ch-${chNum}`,
-        title: `Chapter ${chNum}: The Journey of ${cleanName} Begins`,
-        chapterNumber: chNum,
-        pages: Array.from({ length: 5 }, (_, pgIndex) => ({
-          id: `${sourceId}-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${index}-ch-${chNum}-p-${pgIndex + 1}`,
-          pageNumber: pgIndex + 1,
-          imageUrl: PAGE_IMAGES[(index + chIndex + pgIndex) % PAGE_IMAGES.length]
-        }))
-      };
-    });
+      <div className="bg-black/40 rounded-xl p-4 space-y-3 text-xs">
+        <div>
+          <span className="text-white/40 block mb-0.5">Package</span>
+          <code className="text-white/80 font-mono text-[11px] break-all">{extension.pkg || "—"}</code>
+        </div>
 
-    return {
-      id: `${sourceId}-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${index}`,
-      title,
-      description: `An immersive publication distributed via the custom ${cleanName} provider catalog. Highly recommended for fans of the genre!`,
-      coverUrl,
-      author,
-      genre: genres[index % genres.length],
-      status: index % 2 === 0 ? "Completed" : "Ongoing",
-      sourceId,
-      chapters
-    };
-  });
-};
+        {extension.version && (
+          <div>
+            <span className="text-white/40 block mb-0.5">Version</span>
+            <span className="text-white/80">{extension.version}</span>
+          </div>
+        )}
+      </div>
+
+      {sources.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="text-xs font-bold uppercase tracking-wider text-white/50">Source Websites</h4>
+          <div className="space-y-1.5">
+            {sources.map((s: any, i: number) => (
+              <div key={i} className="bg-black/40 rounded-lg p-3 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-white/90 truncate">{s.name || s.baseUrl}</p>
+                  {s.baseUrl && (
+                    <p className="text-[10px] text-white/40 truncate font-mono">{s.baseUrl}</p>
+                  )}
+                </div>
+                {s.baseUrl && (
+                  <a
+                    href={s.baseUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0 p-2 bg-[#1e1e1e] hover:bg-[#252525] border border-white/10 rounded-lg text-white/60 hover:text-white transition-colors"
+                    title="Open source website"
+                  >
+                    <Globe className="w-4 h-4" />
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {apkUrl && (
+        <a
+          href={apkUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-colors shadow-lg shadow-indigo-950/40"
+        >
+          <Download className="w-4 h-4" />
+          <span>Download APK</span>
+        </a>
+      )}
+    </div>
+  );
+}
 
 export default function SourceManager({ onReadChapter }: SourceManagerProps) {
   const [sources, setSources] = useState<MangaSource[]>(INITIAL_SOURCES);
@@ -319,15 +334,13 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     const initialExtName = defaultExt ? defaultExt.name : extensions[0]?.name || "Comick";
     setSelectedExtensionName(initialExtName);
 
-    const initialMangas = generateMangasForExtension(initialExtName, "keiyoushi-repo");
-
     setSources(prev => prev.map(s => {
       if (s.id === "keiyoushi-repo") {
-        return { ...s, mangas: initialMangas };
+        return { ...s, mangas: [] };
       }
       return s;
     }));
-    setSearchResults(initialMangas);
+    setSearchResults([]);
     setLoading(false);
   };
 
@@ -393,17 +406,8 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
             ext => ext.name.toLowerCase().includes(query) || ext.pkg.toLowerCase().includes(query)
           );
           if (matchedExt) {
-            const extName = matchedExt.name;
-            setSelectedExtensionName(extName);
-            const updatedMangas = generateMangasForExtension(extName, "keiyoushi-repo");
-            
-            setSources(prev => prev.map(s => {
-              if (s.id === "keiyoushi-repo") {
-                return { ...s, mangas: updatedMangas };
-              }
-              return s;
-            }));
-            setSearchResults(updatedMangas);
+            setSelectedExtensionName(matchedExt.name);
+            setSearchResults([]);
             setActiveManga(null);
             return;
           }
@@ -679,20 +683,18 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
         const initialExtName = defaultExt ? defaultExt.name : "";
         setSelectedExtensionName(initialExtName);
         
-        const initialMangas = initialExtName ? generateMangasForExtension(initialExtName, "keiyoushi-repo") : [];
-        
         const newSource: MangaSource = {
           id: "keiyoushi-repo",
           name: "Keiyoushi Extensions Catalog",
           description: "Multi-source repository from Keiyoushi's extension index. Select from thousands of active scanlation extensions.",
           type: "custom",
-          mangas: initialMangas,
+          mangas: [],
           url: finalUrl
         };
         
         setSources(prev => [...prev.filter(s => s.id !== "keiyoushi-repo"), newSource]);
         setSelectedSourceId("keiyoushi-repo");
-        setSearchResults(initialMangas);
+        setSearchResults([]);
         setSearchQuery("");
         setActiveManga(null);
         setCustomJsonUrl("");
@@ -1119,17 +1121,8 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
                     ext.name.toLowerCase().includes(val.toLowerCase())
                   );
                   if (filtered.length > 0) {
-                    const firstMatch = filtered[0].name;
-                    setSelectedExtensionName(firstMatch);
-                    
-                    const updatedMangas = generateMangasForExtension(firstMatch, "keiyoushi-repo");
-                    setSources(prev => prev.map(s => {
-                      if (s.id === "keiyoushi-repo") {
-                        return { ...s, mangas: updatedMangas };
-                      }
-                      return s;
-                    }));
-                    setSearchResults(updatedMangas);
+                    setSelectedExtensionName(filtered[0].name);
+                    setSearchResults([]);
                     setActiveManga(null);
                   }
                 }}
@@ -1140,20 +1133,8 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
             <select
               value={selectedExtensionName}
               onChange={(e) => {
-                const extName = e.target.value;
-                setSelectedExtensionName(extName);
-                
-                // Update the mangas of keiyoushi-repo
-                const updatedMangas = generateMangasForExtension(extName, "keiyoushi-repo");
-                setSources(prev => prev.map(s => {
-                  if (s.id === "keiyoushi-repo") {
-                    return { ...s, mangas: updatedMangas };
-                  }
-                  return s;
-                }));
-
-                // Immediately update display lists
-                setSearchResults(updatedMangas);
+                setSelectedExtensionName(e.target.value);
+                setSearchResults([]);
                 setSearchQuery("");
                 setActiveManga(null);
               }}
@@ -1184,21 +1165,40 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
             </div>
           )}
 
-          {loading ? (
+          {selectedSourceId === "keiyoushi-repo" && selectedExtensionName ? (
+            <ExtensionDetails
+              extension={keiyoushiExtensions.find(e => e.name === selectedExtensionName)}
+              onClose={() => setActiveManga(null)}
+            />
+          ) : loading ? (
             <div className="h-48 flex items-center justify-center flex-col gap-2">
               <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
               <p className="text-sm text-white/40">Querying manga sources catalog...</p>
             </div>
           ) : searchResults.length === 0 ? (
-            <div className="p-8 text-center bg-[#121212] border border-white/5 rounded-2xl flex flex-col items-center gap-3">
-              <Box className="w-8 h-8 text-white/20" />
-              <div className="space-y-1">
-                <p className="text-sm font-bold text-white/75">No Catalog results</p>
-                <p className="text-xs text-white/40 max-w-sm">
-                  Try typing "manga", "cyber", or click search again. Or add an external JSON repository.
-                </p>
+            selectedSourceId === "keiyoushi-repo" ? (
+              <div className="p-8 text-center bg-[#121212] border border-white/5 rounded-2xl flex flex-col items-center gap-3">
+                <Database className="w-8 h-8 text-indigo-400" />
+                <div className="space-y-1">
+                  <p className="text-sm font-bold text-white/75">Tachiyomi Extension Browser</p>
+                  <p className="text-xs text-white/40 max-w-sm">
+                    Select an extension from the dropdown above to view its details,
+                    source website, and APK download link. Extensions require the
+                    Mihon / Tachiyomi Android app to run.
+                  </p>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="p-8 text-center bg-[#121212] border border-white/5 rounded-2xl flex flex-col items-center gap-3">
+                <Box className="w-8 h-8 text-white/20" />
+                <div className="space-y-1">
+                  <p className="text-sm font-bold text-white/75">No Catalog results</p>
+                  <p className="text-xs text-white/40 max-w-sm">
+                    Try typing "manga", "cyber", or click search again. Or add an external JSON repository.
+                  </p>
+                </div>
+              </div>
+            )
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4">
               {searchResults.map(m => {
