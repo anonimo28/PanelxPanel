@@ -19,10 +19,12 @@ import {
   Eye,
   EyeOff,
   Columns,
-  Expand
+  Expand,
+  MessageCircle
 } from "lucide-react";
 import { Page, Panel } from "../types";
-import { detectPanelsHeuristic, detectPanelsAdvanced, createGridPanels, loadImage } from "../lib/cv-helper";
+import { detectPanelsHeuristic, detectPanelsAdvanced, detectTextBalloons, createGridPanels, loadImage } from "../lib/cv-helper";
+import type { Balloon } from "../lib/cv-helper";
 
 interface PanelViewerProps {
   page: Page;
@@ -41,13 +43,18 @@ export default function PanelViewer({
   onNextPage,
   onUpdatePagePanels,
 }: PanelViewerProps) {
-  const [readingMode, setReadingMode] = useState<"page" | "panel">("panel");
+  const [readingMode, setReadingMode] = useState<"page" | "panel" | "balloon">("panel");
   const [currentPanelIndex, setCurrentPanelIndex] = useState(0);
   const [panels, setPanels] = useState<Panel[]>(page.panels || []);
   const [isDetecting, setIsDetecting] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [selectedPanelId, setSelectedPanelId] = useState<number | null>(null);
+
+  // Balloon reading mode state
+  const [balloons, setBalloons] = useState<Balloon[][]>([]);
+  const [currentBalloonIndex, setCurrentBalloonIndex] = useState(0);
+  const [isDetectingBalloons, setIsDetectingBalloons] = useState(false);
 
   // Focus & Immersive Blackout settings
   const [blackoutSurround, setBlackoutSurround] = useState<boolean>(true);
@@ -112,34 +119,58 @@ export default function PanelViewer({
       handleAutoDetectHeuristic();
     }
     setCurrentPanelIndex(0);
+    setBalloons([]);
+    setCurrentBalloonIndex(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
+
+  // Auto-detect balloons when entering balloon mode
+  useEffect(() => {
+    if (readingMode === "balloon" && panels.length > 0 && balloons.length === 0 && !isDetectingBalloons) {
+      setIsDetectingBalloons(true);
+      detectTextBalloons(page.imageUrl, panels).then((detected) => {
+        setBalloons(detected);
+        setCurrentBalloonIndex(0);
+        setIsDetectingBalloons(false);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readingMode, page.imageUrl, panels]);
 
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (isEditing) return; // disable during manual edits
+      if (isEditing) return;
       if (e.key === "ArrowRight" || e.key === " ") {
         handleNext();
       } else if (e.key === "ArrowLeft") {
         handlePrev();
       } else if (e.key === "v" || e.key === "V") {
-        setReadingMode((m) => (m === "page" ? "panel" : "page"));
+        setReadingMode((m) => m === "page" ? "panel" : m === "panel" ? "balloon" : "page");
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPanelIndex, panels, readingMode, isEditing]);
+  }, [currentPanelIndex, currentBalloonIndex, panels, balloons, readingMode, isEditing]);
 
   const handlePrev = () => {
     if (readingMode === "page") {
       onPrevPage();
+    } else if (readingMode === "balloon") {
+      if (currentBalloonIndex > 0) {
+        setCurrentBalloonIndex(currentBalloonIndex - 1);
+      } else if (currentPanelIndex > 0) {
+        const prevBalls = balloons[currentPanelIndex - 1];
+        setCurrentPanelIndex(currentPanelIndex - 1);
+        setCurrentBalloonIndex(prevBalls ? Math.max(0, prevBalls.length - 1) : 0);
+      } else {
+        onPrevPage();
+      }
     } else {
       if (currentPanelIndex > 0) {
         setCurrentPanelIndex(currentPanelIndex - 1);
       } else {
-        // Go to previous page and target its last panel
         onPrevPage();
       }
     }
@@ -148,11 +179,20 @@ export default function PanelViewer({
   const handleNext = () => {
     if (readingMode === "page") {
       onNextPage();
+    } else if (readingMode === "balloon") {
+      const currentBalls = balloons[currentPanelIndex];
+      if (currentBalls && currentBalloonIndex < currentBalls.length - 1) {
+        setCurrentBalloonIndex(currentBalloonIndex + 1);
+      } else if (currentPanelIndex < panels.length - 1) {
+        setCurrentPanelIndex(currentPanelIndex + 1);
+        setCurrentBalloonIndex(0);
+      } else {
+        onNextPage();
+      }
     } else {
       if (currentPanelIndex < panels.length - 1) {
         setCurrentPanelIndex(currentPanelIndex + 1);
       } else {
-        // Go to next page
         onNextPage();
       }
     }
@@ -271,7 +311,8 @@ export default function PanelViewer({
   // and the page's intrinsic image size, so it's correct regardless of
   // whether object-contain letterboxes the page or object-cover crops it.
   const currentPanel = panels[currentPanelIndex] || { id: 1, box: [0, 0, 1000, 1000] };
-  const [ymin, xmin, ymax, xmax] = currentPanel.box;
+  const currentBalloonBox = readingMode === "balloon" ? balloons[currentPanelIndex]?.[currentBalloonIndex]?.box : null;
+  const [ymin, xmin, ymax, xmax] = currentBalloonBox || currentPanel.box;
 
   const containerW = containerSize.w;
   const containerH = containerSize.h;
@@ -329,7 +370,11 @@ export default function PanelViewer({
       <div className="bg-[#121212] border-b border-white/10 px-4 py-3 flex items-center justify-between z-10" id="viewer-top-bar">
         <div className="flex items-center gap-2">
           <span className="bg-red-600 text-white text-[10px] tracking-wider uppercase font-extrabold px-2 py-0.5 rounded">
-            {readingMode === "panel" ? `Panel ${currentPanelIndex + 1}/${panels.length}` : "Page Mode"}
+            {readingMode === "balloon"
+              ? `Balloon ${currentBalloonIndex + 1}/${balloons[currentPanelIndex]?.length || 0}`
+              : readingMode === "panel"
+                ? `Panel ${currentPanelIndex + 1}/${panels.length}`
+                : "Page Mode"}
           </span>
           <p className="text-xs text-white/40 font-medium">
             Page {pageIndex + 1} of {totalPages}
@@ -339,21 +384,29 @@ export default function PanelViewer({
         <div className="flex items-center gap-2">
           {/* Quick toggle Reading Mode */}
           <button
-            onClick={() => setReadingMode(readingMode === "page" ? "panel" : "page")}
+            onClick={() => setReadingMode(
+              readingMode === "page" ? "panel" : readingMode === "panel" ? "balloon" : "page"
+            )}
             className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold ${
               readingMode === "panel"
                 ? "bg-blue-600/15 text-blue-400 border border-blue-500/30"
-                : "bg-[#1e1e1e] hover:bg-[#252525] border border-white/5 text-white/80 hover:text-white"
+                : readingMode === "balloon"
+                  ? "bg-amber-600/15 text-amber-400 border border-amber-500/30"
+                  : "bg-[#1e1e1e] hover:bg-[#252525] border border-white/5 text-white/80 hover:text-white"
             }`}
-            title="Toggle panel / full page reading mode"
+            title="Cycle reading modes: Page / Panel / Balloon"
             id="toggle-reading-mode-btn"
           >
-            {readingMode === "panel" ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-            <span className="hidden sm:inline">{readingMode === "panel" ? "Panel View" : "Page View"}</span>
+            {readingMode === "page" ? <Maximize2 className="w-4 h-4" /> :
+             readingMode === "balloon" ? <MessageCircle className="w-4 h-4" /> :
+             <Minimize2 className="w-4 h-4" />}
+            <span className="hidden sm:inline">
+              {readingMode === "page" ? "Page View" : readingMode === "balloon" ? "Balloon View" : "Panel View"}
+            </span>
           </button>
 
           {/* Cinematic Blackout Toggle */}
-          {readingMode === "panel" && (
+          {readingMode !== "page" && (
             <button
               onClick={() => setBlackoutSurround(!blackoutSurround)}
               className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold border ${
@@ -370,7 +423,7 @@ export default function PanelViewer({
           )}
 
           {/* Fill Screen Toggle */}
-          {readingMode === "panel" && (
+          {readingMode !== "page" && (
             <button
               onClick={() => setFillScreen(!fillScreen)}
               className={`p-2 rounded-lg transition-all flex items-center gap-1.5 text-xs font-semibold border ${
@@ -682,8 +735,8 @@ export default function PanelViewer({
         </AnimatePresence>
 
         {/* ---------------- DRAW STAGE AND ANIMATOR ---------------- */}
-        {readingMode === "panel" ? (
-          /* Immersive Pitch Black Guided Panel Mode */
+        {readingMode === "panel" || readingMode === "balloon" ? (
+          /* Immersive Pitch Black Guided Panel / Balloon Mode */
           <div className="absolute inset-0 flex items-center justify-center bg-black overflow-hidden select-none">
             {/* Dark vignette layer — hidden in fill screen mode */}
             {!fillScreen && (
@@ -958,7 +1011,7 @@ export default function PanelViewer({
 
         {/* ---------------- HOTKEYS INSTRUCTION ON-SCREEN OVERLAY ---------------- */}
         <div className="absolute bottom-20 left-4 text-[10px] text-white/30 bg-black/80 px-3 py-1.5 rounded-lg border border-white/5 pointer-events-none hidden sm:block">
-          💡 Hotkeys: <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">Space</kbd> / <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">→</kbd> next, <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">←</kbd> prev, <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">V</kbd> switch modes
+          💡 Hotkeys: <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">Space</kbd> / <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">→</kbd> next, <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">←</kbd> prev, <kbd className="bg-[#1e1e1e] px-1 rounded text-white/50 border border-white/5">V</kbd> cycle modes
         </div>
       </div>
 
@@ -974,9 +1027,22 @@ export default function PanelViewer({
             <ChevronLeft className="w-5 h-5" />
           </button>
 
-          {/* Quick Jump Panel Dots Indicator */}
+          {/* Quick Jump Panel / Balloon Dots Indicator */}
           <div className="flex-1 flex justify-center items-center gap-1 mx-3 overflow-x-auto py-1 max-w-[220px] sm:max-w-[350px]">
-            {readingMode === "panel" ? (
+            {readingMode === "balloon" && balloons[currentPanelIndex]?.length > 0 ? (
+              balloons[currentPanelIndex].map((b, idx) => (
+                <button
+                  key={b.id}
+                  onClick={() => setCurrentBalloonIndex(idx)}
+                  className={`h-2 rounded-full transition-all duration-300 ${
+                    idx === currentBalloonIndex
+                      ? "w-6 bg-amber-500"
+                      : "w-2 bg-[#252525] hover:bg-white/20"
+                  }`}
+                  title={`Jump to balloon ${idx + 1}`}
+                />
+              ))
+            ) : readingMode === "panel" || readingMode === "balloon" ? (
               panels.map((p, idx) => (
                 <button
                   key={p.id}
@@ -990,7 +1056,7 @@ export default function PanelViewer({
                 />
               ))
             ) : (
-              <span className="text-white/40 text-xs font-semibold tracking-wider font-sans uppercase">Immersive View Enabled</span>
+              <span className="text-white/40 text-xs font-semibold tracking-wider font-sans uppercase">Page View</span>
             )}
           </div>
 

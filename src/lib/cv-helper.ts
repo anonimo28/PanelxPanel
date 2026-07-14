@@ -994,6 +994,135 @@ export async function detectPanelsAdvanced(
   }
 }
 
+export interface Balloon {
+  id: number;
+  box: [number, number, number, number]; // [ymin, xmin, ymax, xmax] in 0-1000 page coords
+}
+
+function sortBalloonsRTL(balloons: Balloon[]): Balloon[] {
+  if (balloons.length <= 1) return balloons;
+
+  const sorted: Balloon[] = [];
+  const remaining = balloons.map((b) => ({ ...b }));
+
+  while (remaining.length > 0) {
+    remaining.sort((a, b) => a.box[0] - b.box[0]);
+    const top = remaining[0];
+
+    const tier = remaining.filter((b) => {
+      const overlap = Math.max(0, Math.min(b.box[2], top.box[2]) - Math.max(b.box[0], top.box[0]));
+      const minH = Math.min(b.box[2] - b.box[0], top.box[2] - top.box[0]);
+      return minH > 0 && overlap / minH >= 0.4;
+    });
+
+    tier.sort((a, b) => b.box[1] - a.box[1]);
+
+    for (const b of tier) {
+      sorted.push(b);
+      const idx = remaining.indexOf(b);
+      if (idx > -1) remaining.splice(idx, 1);
+    }
+  }
+
+  return sorted;
+}
+
+/**
+ * Detects text/speech balloons within manga panels using luminance thresholding
+ * and connected component analysis. Returns balloons sorted in RTL reading order.
+ */
+export async function detectTextBalloons(
+  imageUrl: string,
+  panels: { box: [number, number, number, number] }[]
+): Promise<Balloon[][]> {
+  try {
+    const img = await loadImage(imageUrl);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return panels.map(() => []);
+
+    const targetWidth = Math.min(1000, img.width);
+    const targetHeight = Math.round((img.height / img.width) * targetWidth);
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+    const data = imgData.data;
+
+    const results: Balloon[][] = [];
+
+    for (let pi = 0; pi < panels.length; pi++) {
+      const panel = panels[pi];
+      const [pYmin, pXmin, pYmax, pXmax] = panel.box;
+
+      const pxYmin = Math.round((pYmin / 1000) * targetHeight);
+      const pxYmax = Math.round((pYmax / 1000) * targetHeight);
+      const pxXmin = Math.round((pXmin / 1000) * targetWidth);
+      const pxXmax = Math.round((pXmax / 1000) * targetWidth);
+
+      const pw = pxXmax - pxXmin;
+      const ph = pxYmax - pxYmin;
+      if (pw < 20 || ph < 20) { results.push([]); continue; }
+
+      // Extract luminance within panel bounds
+      const lum = new Float32Array(pw * ph);
+      for (let y = 0; y < ph; y++) {
+        for (let x = 0; x < pw; x++) {
+          const srcIdx = ((pxYmin + y) * targetWidth + (pxXmin + x)) * 4;
+          lum[y * pw + x] = 0.299 * data[srcIdx] + 0.587 * data[srcIdx + 1] + 0.114 * data[srcIdx + 2];
+        }
+      }
+
+      // Threshold for white/bright regions (speech bubbles)
+      const white = new Uint8Array(pw * ph);
+      for (let i = 0; i < lum.length; i++) {
+        white[i] = lum[i] > 190 ? 1 : 0;
+      }
+
+      // Morphological close to fill small gaps
+      const dilated = morphDilate(white, pw, ph, 3);
+      const closed = morphErode(dilated, pw, ph, 3);
+
+      // Connected components on white regions
+      const minPixels = Math.max(30, 0.015 * pw * ph);
+      const comps = connectedComponents(closed, pw, ph, minPixels);
+
+      const panelBalloons: Balloon[] = [];
+      let bid = 1;
+
+      for (const comp of comps) {
+        const cw = comp.xmax - comp.xmin;
+        const ch = comp.ymax - comp.ymin;
+        const aspectRatio = Math.max(cw, ch) / Math.min(cw, ch);
+
+        // Balloons shouldn't be too elongated
+        if (aspectRatio > 3.5) continue;
+
+        // Balloons typically don't touch panel edges
+        const marginX = Math.round(pw * 0.03);
+        const marginY = Math.round(ph * 0.03);
+        if (comp.xmin <= marginX || comp.xmax >= pw - 1 - marginX ||
+            comp.ymin <= marginY || comp.ymax >= ph - 1 - marginY) continue;
+
+        const ymin = pYmin + Math.round((comp.ymin / ph) * (pYmax - pYmin));
+        const ymax = pYmin + Math.round((comp.ymax / ph) * (pYmax - pYmin));
+        const xmin = pXmin + Math.round((comp.xmin / pw) * (pXmax - pXmin));
+        const xmax = pXmin + Math.round((comp.xmax / pw) * (pXmax - pXmin));
+
+        panelBalloons.push({ id: bid++, box: [ymin, xmin, ymax, xmax] });
+      }
+
+      results.push(sortBalloonsRTL(panelBalloons));
+    }
+
+    return results;
+  } catch (err) {
+    console.warn("Balloon detection failed, returning empty", err);
+    return panels.map(() => []);
+  }
+}
+
 /**
  * Creates uniform grids of panels as a fast secondary algorithm
  */
