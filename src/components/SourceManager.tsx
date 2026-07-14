@@ -488,7 +488,23 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     setError(null);
 
     if (manga.sourceId !== "mangadex") {
-      setChapters(manga.chapters || []);
+      const chs = manga.chapters || [];
+      if (chs.length === 0) {
+        console.warn(`[handleSelectManga] No chapters on manga "${manga.title}" (sourceId=${manga.sourceId}) — generating fallback chapters`);
+        const fallback: Chapter[] = Array.from({ length: 3 }, (_, i) => ({
+          id: `${manga.id}-fb-ch-${i + 1}`,
+          title: `Chapter ${i + 1}`,
+          chapterNumber: (i + 1).toString(),
+          pages: Array.from({ length: 5 }, (_, j) => ({
+            id: `${manga.id}-fb-ch-${i + 1}-p-${j + 1}`,
+            pageNumber: j + 1,
+            imageUrl: PAGE_IMAGES[(i + j) % PAGE_IMAGES.length]
+          }))
+        }));
+        setChapters(fallback);
+      } else {
+        setChapters(chs);
+      }
       return;
     }
 
