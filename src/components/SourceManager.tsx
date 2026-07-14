@@ -304,6 +304,7 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     { name: "WebtoonXYZ", pkg: "webtoonxyz", lang: "en", nsfw: false },
     { name: "AsuraScans", pkg: "asurascans", lang: "en", nsfw: false },
     { name: "ReaperScans", pkg: "reaperscans", lang: "en", nsfw: false },
+    { name: "Tachiyomi: MangaTaro", pkg: "eu.kanade.tachiyomi.extension.all.mangataro", lang: "all", nsfw: false },
   ];
 
   const autoLoadKeiyoushi = async () => {
