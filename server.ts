@@ -74,7 +74,14 @@ app.get("/api/proxy", async (req, res) => {
     // Always ensure square brackets in query string/paths are encoded for strict API gateways
     finalUrl = finalUrl.replace(/\[/g, "%5B").replace(/\]/g, "%5D");
 
-    const response = await fetch(finalUrl, { headers });
+    const controller = new AbortController();
+    const proxyTimeout = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+      response = await fetch(finalUrl, { headers, signal: controller.signal });
+    } finally {
+      clearTimeout(proxyTimeout);
+    }
 
     if (!response.ok) {
       console.warn(`Proxy failed to fetch target URL: ${finalUrl}, status: ${response.status}`);

@@ -771,15 +771,42 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
 
     try {
       // 1. Fetch website HTML via our CORS bypass proxy
-      const res = await fetch(`/api/proxy?url=${encodeURIComponent(finalUrl)}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+      let res;
+      try {
+        res = await fetch(`/api/proxy?url=${encodeURIComponent(finalUrl)}`, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
       if (!res.ok) {
         throw new Error(`Failed to load website. Status: ${res.status} ${res.statusText}`);
       }
-      const html = await res.text();
+
+      let html;
+      try {
+        html = await res.text();
+      } catch {
+        throw new Error("Failed to read website response body — the server may have closed the connection.");
+      }
+
+      if (!html || html.length < 50) {
+        throw new Error("Website returned empty or very short response — check the URL.");
+      }
 
       // 2. Parse HTML using browser DOMParser
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, "text/html");
+      let doc: Document;
+      try {
+        const parser = new DOMParser();
+        doc = parser.parseFromString(html, "text/html");
+        if (!doc || !doc.querySelectorAll) {
+          throw new Error("DOMParser returned an invalid document.");
+        }
+      } catch (parseErr: any) {
+        throw new Error(`Failed to parse website HTML: ${parseErr.message || parseErr}`);
+      }
 
       // Extract site name from title or fallback to domain
       let siteTitle = doc.title || "";
@@ -808,6 +835,12 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
       const seenImages = new Set<string>();
 
       const images = doc.querySelectorAll("img");
+      if (images.length === 0) {
+        console.warn(`[handleAddWebsiteSource] No <img> elements found in "${finalUrl}" — site likely JS-rendered. Using fallback.`);
+      } else {
+        console.log(`[handleAddWebsiteSource] Found ${images.length} images on ${finalUrl}`);
+      }
+
       images.forEach((img) => {
         const src = img.getAttribute("src") || img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || "";
         if (!src) return;
@@ -964,6 +997,12 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
           });
         });
       }
+
+      if (foundMangas.length === 0) {
+        throw new Error(`No manga content could be extracted from "${finalUrl}". The site may require JavaScript to render its catalog. Try a different URL.`);
+      }
+
+      console.log(`[handleAddWebsiteSource] Created source "${cleanSiteName}" with ${foundMangas.length} mangas, total chapters: ${foundMangas.reduce((sum, m) => sum + (m.chapters?.length || 0), 0)}`);
 
       const newSourceId = `web-source-${cleanSiteName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
       const newSource: MangaSource = {
