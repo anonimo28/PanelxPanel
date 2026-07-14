@@ -18,7 +18,8 @@ import {
   Database,
   FolderHeart,
   Library,
-  Heart
+  Heart,
+  RefreshCw
 } from "lucide-react";
 import JSZip from "jszip";
 import { Manga, Chapter, Page, MangaSource } from "../types";
@@ -36,69 +37,6 @@ const INITIAL_SOURCES: MangaSource[] = [
     description: "Access millions of official translated mangas and scanlations in real-time.",
     type: "official",
     mangas: [],
-  },
-  {
-    id: "classic-manga-repo",
-    name: "Comic Archive Repo (JSON Source)",
-    description: "Classic open-licensed independent manga titles for testing.",
-    type: "json",
-    mangas: [
-      {
-        id: "cyberpunk-echoes",
-        title: "Cyberpunk Echoes",
-        author: "Satoshi Tanaka",
-        description: "In a neon-drenched futuristic metropolis, an augmented hacker discovers a secret memory core containing forbidden historical records of the old world.",
-        coverUrl: "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=500&q=80",
-        sourceId: "classic-manga-repo",
-        genre: ["Sci-Fi", "Cyberpunk", "Mystery"],
-        status: "Completed",
-        chapters: [
-          {
-            id: "ce-chap-1",
-            title: "Chapter 1: Neon Genesis",
-            chapterNumber: "1",
-            pages: [
-              { id: "ce1-1", pageNumber: 1, imageUrl: "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?w=800&q=80" },
-              { id: "ce1-2", pageNumber: 2, imageUrl: "https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=800&q=80" },
-              { id: "ce1-3", pageNumber: 3, imageUrl: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800&q=80" },
-              { id: "ce1-4", pageNumber: 4, imageUrl: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80" },
-            ]
-          },
-          {
-            id: "ce-chap-2",
-            title: "Chapter 2: Augmented Ghost",
-            chapterNumber: "2",
-            pages: [
-              { id: "ce2-1", pageNumber: 1, imageUrl: "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=800&q=80" },
-              { id: "ce2-2", pageNumber: 2, imageUrl: "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=800&q=80" },
-              { id: "ce2-3", pageNumber: 3, imageUrl: "https://images.unsplash.com/photo-1531297484001-80022131f5a1?w=800&q=80" },
-            ]
-          }
-        ]
-      },
-      {
-        id: "zen-scrolls",
-        title: "Zen Scrolls",
-        author: "Koji Murata",
-        description: "A peaceful martial artist travels the rural countryside, solving disputes using philosophy rather than swordplay.",
-        coverUrl: "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=500&q=80",
-        sourceId: "classic-manga-repo",
-        genre: ["Historical", "Philosophy", "Action"],
-        status: "Ongoing",
-        chapters: [
-          {
-            id: "zs-chap-1",
-            title: "Chapter 1: The Quiet Sword",
-            chapterNumber: "1",
-            pages: [
-              { id: "zs1-1", pageNumber: 1, imageUrl: "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=800&q=80" },
-              { id: "zs1-2", pageNumber: 2, imageUrl: "https://images.unsplash.com/photo-1511497584788-876760111969?w=800&q=80" },
-              { id: "zs1-3", pageNumber: 3, imageUrl: "https://images.unsplash.com/photo-1501785888041-af3ef285b470?w=800&q=80" },
-            ]
-          }
-        ]
-      }
-    ]
   },
   {
     id: "keiyoushi-repo",
@@ -253,9 +191,7 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     try {
       let pages: Page[] = [];
 
-      if (activeManga.sourceId === "classic-manga-repo" && chapter.pages) {
-        pages = chapter.pages;
-      } else if (activeManga.sourceId === "mangadex") {
+      if (activeManga.sourceId === "mangadex") {
         const pageListUrl = `https://api.mangadex.org/at-home/server/${chId}`;
         const data = await safeFetchJson(pageListUrl);
         const hash = data.chapter.hash;
@@ -342,40 +278,62 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     }
   }, [selectedSourceId, keiyoushiExtensions.length]);
 
+  const FALLBACK_EXTENSIONS = [
+    { name: "MangaDex", pkg: "mangadex", lang: "en", nsfw: false },
+    { name: "Comick", pkg: "comick", lang: "en", nsfw: false },
+    { name: "Mangakakalot", pkg: "mangakakalot", lang: "en", nsfw: false },
+    { name: "MangaReader", pkg: "mangareader", lang: "en", nsfw: false },
+    { name: "MangaHere", pkg: "mangahere", lang: "en", nsfw: false },
+    { name: "MangaPanda", pkg: "mangapanda", lang: "en", nsfw: false },
+    { name: "MangaBat", pkg: "mangabat", lang: "en", nsfw: false },
+    { name: "WebtoonXYZ", pkg: "webtoonxyz", lang: "en", nsfw: false },
+    { name: "AsuraScans", pkg: "asurascans", lang: "en", nsfw: false },
+    { name: "ReaperScans", pkg: "reaperscans", lang: "en", nsfw: false },
+  ];
+
   const autoLoadKeiyoushi = async () => {
     setError(null);
     setLoading(true);
+    let extensions: any[] = [];
     try {
       const url = "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json";
       const data = await safeFetchJson(url);
-      
       if (Array.isArray(data) && data.length > 0) {
-        setKeiyoushiExtensions(data);
-        
-        const defaultExt = data.find((e: any) => e.name.toLowerCase().includes("comick") && !e.nsfw) || 
-                           data.find((e: any) => e.name.toLowerCase().includes("comic") && !e.nsfw) || 
-                           data.find((e: any) => !e.nsfw) || 
-                           data[0];
-                           
-        const initialExtName = defaultExt ? defaultExt.name : "";
-        setSelectedExtensionName(initialExtName);
-        
-        const initialMangas = initialExtName ? generateMangasForExtension(initialExtName, "keiyoushi-repo") : [];
-        
-        setSources(prev => prev.map(s => {
-          if (s.id === "keiyoushi-repo") {
-            return { ...s, mangas: initialMangas };
-          }
-          return s;
-        }));
-        setSearchResults(initialMangas);
+        extensions = data;
       }
     } catch (err: any) {
-      console.error(err);
-      setError("Could not automatically load Keiyoushi Extensions: " + err.message);
-    } finally {
-      setLoading(false);
+      console.warn("Keiyoushi GitHub fetch failed, using fallback extensions", err);
     }
+
+    if (extensions.length === 0) {
+      extensions = FALLBACK_EXTENSIONS;
+    }
+
+    setKeiyoushiExtensions(extensions);
+
+    const defaultExt = extensions.find((e: any) => e.name.toLowerCase().includes("comick") && !e.nsfw) ||
+                       extensions.find((e: any) => e.name.toLowerCase().includes("comic") && !e.nsfw) ||
+                       extensions.find((e: any) => !e.nsfw) ||
+                       extensions[0];
+
+    const initialExtName = defaultExt ? defaultExt.name : extensions[0]?.name || "Comick";
+    setSelectedExtensionName(initialExtName);
+
+    const initialMangas = generateMangasForExtension(initialExtName, "keiyoushi-repo");
+
+    setSources(prev => prev.map(s => {
+      if (s.id === "keiyoushi-repo") {
+        return { ...s, mangas: initialMangas };
+      }
+      return s;
+    }));
+    setSearchResults(initialMangas);
+    setLoading(false);
+  };
+
+  const handleRetryKeiyoushi = () => {
+    setKeiyoushiExtensions([]);
+    autoLoadKeiyoushi();
   };
 
   // Performs cross-origin requests safely through our server proxy
@@ -507,7 +465,7 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     setChapters([]);
     setError(null);
 
-    if (manga.sourceId === "classic-manga-repo") {
+    if (manga.sourceId !== "mangadex") {
       setChapters(manga.chapters || []);
       return;
     }
@@ -566,7 +524,7 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     setError(null);
 
     // If local or JSON pre-seeded has pages already
-    if (activeManga.sourceId === "classic-manga-repo" || (chapter.pages && chapter.pages.length > 0)) {
+    if (activeManga.sourceId !== "mangadex" || (chapter.pages && chapter.pages.length > 0)) {
       onReadChapter(activeManga, chapter);
       return;
     }
@@ -617,9 +575,7 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     try {
       let pages: Page[] = [];
 
-      if (activeManga.sourceId === "classic-manga-repo" && chapter.pages) {
-        pages = chapter.pages;
-      } else if (activeManga.sourceId === "mangadex") {
+      if (activeManga.sourceId === "mangadex") {
         const pageListUrl = `https://api.mangadex.org/at-home/server/${chId}`;
         const data = await safeFetchJson(pageListUrl);
         const hash = data.chapter.hash;
@@ -1079,7 +1035,10 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
                 setSelectedSourceId(s.id);
                 setActiveManga(null);
                 setSearchQuery("");
-                if (s.type === "json" || s.type === "custom") {
+                if (s.id === "keiyoushi-repo" && keiyoushiExtensions.length === 0) {
+                  setLoading(true);
+                  setSearchResults([]);
+                } else if (s.type === "json" || s.type === "custom") {
                   setSearchResults(s.mangas || []);
                 } else {
                   setSearchResults([]);
@@ -1134,6 +1093,14 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
             <span className="px-2 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/20 text-[10px] text-indigo-400 font-semibold uppercase">
               {keiyoushiExtensions.length} Active
             </span>
+            <button
+              onClick={handleRetryKeiyoushi}
+              disabled={loading}
+              className="p-1.5 rounded-lg hover:bg-white/5 text-white/40 hover:text-white/80 transition-colors disabled:opacity-30"
+              title="Re-scan extensions from GitHub"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            </button>
           </div>
           
           <div className="flex gap-2 w-full md:w-auto flex-1 max-w-xl">
