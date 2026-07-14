@@ -350,6 +350,23 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
     autoLoadKeiyoushi();
   };
 
+  const handleRemoveSource = (sourceId: string) => {
+    const source = sources.find(s => s.id === sourceId);
+    if (!source) return;
+    const isBuiltIn = source.id === "mangadex" || source.id === "keiyoushi-repo";
+    if (isBuiltIn) return;
+
+    setSources(prev => prev.filter(s => s.id !== sourceId));
+    if (selectedSourceId === sourceId) {
+      const remaining = sources.filter(s => s.id !== sourceId);
+      const nextSource = remaining.length > 0 ? remaining[0] : sources[0];
+      setSelectedSourceId(nextSource.id);
+      setActiveManga(null);
+      setSearchQuery("");
+      setSearchResults(nextSource.mangas || []);
+    }
+  };
+
   // Performs cross-origin requests safely through our server proxy
   const safeFetchJson = async (url: string) => {
     if (!url || url === "undefined" || url === "null" || url.includes("undefined") || url.includes("null")) {
@@ -1031,39 +1048,52 @@ export default function SourceManager({ onReadChapter }: SourceManagerProps) {
         
         {/* Source selector */}
         <div className="flex flex-wrap gap-2 w-full md:w-auto">
-          {sources.map(s => (
-            <button
-              key={s.id}
-              onClick={() => {
-                setSelectedSourceId(s.id);
-                setActiveManga(null);
-                setSearchQuery("");
-                if (s.id === "keiyoushi-repo" && keiyoushiExtensions.length === 0) {
-                  setLoading(true);
-                  setSearchResults([]);
-                } else if (s.type === "json" || s.type === "custom") {
-                  setSearchResults(s.mangas || []);
-                } else {
-                  setSearchResults([]);
-                }
-              }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                selectedSourceId === s.id 
-                  ? "bg-blue-600 text-white shadow-md shadow-blue-900/30" 
-                  : "bg-[#1e1e1e] hover:bg-[#252525] text-white/60 hover:text-white border border-white/5"
-              }`}
-              id={`source-tab-${s.id}`}
-            >
-              {s.id === "mangadex" ? (
-                <Globe className="w-3.5 h-3.5 text-blue-400" />
-              ) : s.id === "keiyoushi-repo" ? (
-                <Database className="w-3.5 h-3.5 text-indigo-400" />
-              ) : (
-                <FileJson className="w-3.5 h-3.5 text-emerald-400" />
-              )}
-              {s.name}
-            </button>
-          ))}
+          {sources.map(s => {
+            const isBuiltIn = s.id === "mangadex" || s.id === "keiyoushi-repo";
+            return (
+              <div key={s.id} className="flex items-center gap-0.5">
+                <button
+                  onClick={() => {
+                    setSelectedSourceId(s.id);
+                    setActiveManga(null);
+                    setSearchQuery("");
+                    if (s.id === "keiyoushi-repo" && keiyoushiExtensions.length === 0) {
+                      setLoading(true);
+                      setSearchResults([]);
+                    } else if (s.type === "json" || s.type === "custom") {
+                      setSearchResults(s.mangas || []);
+                    } else {
+                      setSearchResults([]);
+                    }
+                  }}
+                  className={`px-2.5 py-1.5 rounded-l-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                    selectedSourceId === s.id 
+                      ? "bg-blue-600 text-white shadow-md shadow-blue-900/30" 
+                      : "bg-[#1e1e1e] hover:bg-[#252525] text-white/60 hover:text-white border border-white/5"
+                  } ${isBuiltIn ? "rounded-r-lg" : ""}`}
+                  id={`source-tab-${s.id}`}
+                >
+                  {s.id === "mangadex" ? (
+                    <Globe className="w-3.5 h-3.5 text-blue-400" />
+                  ) : s.id === "keiyoushi-repo" ? (
+                    <Database className="w-3.5 h-3.5 text-indigo-400" />
+                  ) : (
+                    <FileJson className="w-3.5 h-3.5 text-emerald-400" />
+                  )}
+                  {s.name}
+                </button>
+                {!isBuiltIn && (
+                  <button
+                    onClick={() => handleRemoveSource(s.id)}
+                    className="p-1.5 rounded-r-lg bg-[#1e1e1e] hover:bg-red-900/30 border border-l-0 border-white/5 text-white/30 hover:text-red-400 transition-colors"
+                    title={`Remove ${s.name}`}
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         {/* Input search */}
